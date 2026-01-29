@@ -3,12 +3,11 @@ package br.com.seuorg.ans;
 import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import java.io.*;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.http.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.Duration;
@@ -22,107 +21,85 @@ public class App {
             "https://dadosabertos.ans.gov.br/FTP/PDA/demonstracoes_contabeis/2025/1T2025.zip";
 
     public static void main(String[] args) throws Exception {
-        Path workDir = Paths.get("target", "ans");
-        Files.createDirectories(workDir);
 
-        Path zipPath = workDir.resolve("1T2025.zip");
-        Path extractDir = workDir.resolve("1T2025");
+        Path baseDir = Paths.get("target", "ans");
+        Files.createDirectories(baseDir);
+
+        Path zip = baseDir.resolve("1T2025.zip");
+        Path extractDir = baseDir.resolve("1T2025");
 
         System.out.println("Baixando ZIP...");
-        downloadToFile(ZIP_URL, zipPath);
+        download(ZIP_URL, zip);
 
         System.out.println("Extraindo ZIP...");
-        unzip(zipPath, extractDir);
+        unzip(zip, extractDir);
 
-        Path csv = findFirstCsv(extractDir)
-                .orElseThrow(() -> new IllegalStateException("Nenhum .csv encontrado em " + extractDir));
-
+        Path csv = findCsv(extractDir);
         System.out.println("CSV encontrado: " + csv);
 
-        System.out.println("Lendo CSV e mapeando para Trimestres...");
-        List<Trimestres> registros = parseCsvToTrimestres(csv);
+        System.out.println("Lendo CSV...");
+        List<Trimestres> lista = parseCsv(csv);
 
-        System.out.println("Total de registros: " + registros.size());
-
-        // Exemplo: imprime os 3 primeiros
-        registros.stream().limit(3).forEach(r ->
-                System.out.println(r.getData() + " | " + r.getRegAns() + " | " + r.getCdContaContabil() + " | " + r.getDescricao())
+        System.out.println("Total de registros: " + lista.size());
+        lista.stream().limit(3).forEach(t ->
+                System.out.println(t.getData() + " | " + t.getVlSaldoFinal())
         );
     }
 
-    private static void downloadToFile(String url, Path dest) throws IOException, InterruptedException {
+    private static void download(String url, Path dest) throws Exception {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
-                .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofMinutes(2))
                 .GET()
                 .build();
 
-        HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> response =
+                client.send(request, HttpResponse.BodyHandlers.ofInputStream());
 
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IOException("Falha no download. HTTP " + response.statusCode());
-        }
-
-        Files.createDirectories(dest.getParent());
-        try (InputStream in = response.body()) {
-            Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
-        }
+        Files.copy(response.body(), dest, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    private static void unzip(Path zipFile, Path destDir) throws IOException {
-        Files.createDirectories(destDir);
-
-        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipFile)))) {
+    private static void unzip(Path zip, Path dest) throws IOException {
+        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-                Path outPath = destDir.resolve(entry.getName()).normalize();
-
-                // Proteção contra Zip Slip
-                if (!outPath.startsWith(destDir)) {
-                    throw new IOException("Entrada maliciosa no zip: " + entry.getName());
-                }
-
+                Path out = dest.resolve(entry.getName()).normalize();
                 if (entry.isDirectory()) {
-                    Files.createDirectories(outPath);
+                    Files.createDirectories(out);
                 } else {
-                    Files.createDirectories(outPath.getParent());
-                    try (OutputStream out = Files.newOutputStream(outPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-                        zis.transferTo(out);
-                    }
+                    Files.createDirectories(out.getParent());
+                    Files.copy(zis, out, StandardCopyOption.REPLACE_EXISTING);
                 }
-                zis.closeEntry();
             }
         }
     }
 
-    private static Optional<Path> findFirstCsv(Path dir) throws IOException {
+    private static Path findCsv(Path dir) throws IOException {
         try (var stream = Files.walk(dir)) {
             return stream
-                    .filter(p -> Files.isRegularFile(p))
-                    .filter(p -> p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".csv"))
-                    .findFirst();
+                    .filter(p -> p.toString().endsWith(".csv"))
+                    .findFirst()
+                    .orElseThrow();
         }
     }
 
-    private static List<Trimestres> parseCsvToTrimestres(Path csvPath) throws IOException {
-        CsvMapper mapper = new CsvMapper();
+    private static List<Trimestres> parseCsv(Path csv) throws IOException {
 
-        // Ajuste se necessário (separador ;, encoding etc.)
+        CsvMapper mapper = new CsvMapper();
+        mapper.registerModule(new JavaTimeModule());
+
         CsvSchema schema = CsvSchema.emptySchema()
                 .withHeader()
-                .withColumnSeparator(';'); // se for vírgula, troque para ','
+                .withColumnSeparator(';');
 
-        // Se o CSV vier em ISO-8859-1, troque o charset para ISO_8859_1
-        try (Reader reader = Files.newBufferedReader(csvPath, StandardCharsets.UTF_8)) {
-            MappingIterator<Trimestres> it = mapper
-                    .readerFor(Trimestres.class)
-                    .with(schema)
-                    .readValues(reader);
+        try (Reader reader = Files.newBufferedReader(csv, StandardCharsets.UTF_8)) {
+            MappingIterator<Trimestres> it =
+                    mapper.readerFor(Trimestres.class)
+                            .with(schema)
+                            .readValues(reader);
 
             return it.readAll();
         }

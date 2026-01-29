@@ -1,6 +1,7 @@
 package br.com.seuorg.ans;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -20,58 +21,30 @@ public class Trimestres {
     private String descricao;
 
     @JsonProperty("VL_SALDO_INICIAL")
+    @JsonDeserialize(using = BigDecimalPtBrDeserializer.class)
     private BigDecimal vlSaldoInicial;
 
     @JsonProperty("VL_SALDO_FINAL")
+    @JsonDeserialize(using = BigDecimalPtBrDeserializer.class)
     private BigDecimal vlSaldoFinal;
 
     public Trimestres() {}
 
-    public LocalDate getData() {
-        return data;
-    }
+    public LocalDate getData() { return data; }
+    public void setData(LocalDate data) { this.data = data; }
 
-    public void setData(LocalDate data) {
-        this.data = data;
-    }
+    public Integer getRegAns() { return regAns; }
+    public void setRegAns(Integer regAns) { this.regAns = regAns; }
 
-    public Integer getRegAns() {
-        return regAns;
-    }
+    public Integer getCdContaContabil() { return cdContaContabil; }
+    public void setCdContaContabil(Integer cdContaContabil) { this.cdContaContabil = cdContaContabil; }
 
-    public void setRegAns(Integer regAns) {
-        this.regAns = regAns;
-    }
+    public String getDescricao() { return descricao; }
+    public void setDescricao(String descricao) { this.descricao = descricao; }
 
-    public Integer getCdContaContabil() {
-        return cdContaContabil;
-    }
+    public BigDecimal getVlSaldoInicial() { return vlSaldoInicial; }
+    public void setVlSaldoInicial(BigDecimal vlSaldoInicial) { this.vlSaldoInicial = vlSaldoInicial; }
 
-    public void setCdContaContabil(Integer cdContaContabil) {
-        this.cdContaContabil = cdContaContabil;
-    }
-
-    public String getDescricao() {
-        return descricao;
-    }
-
-    public void setDescricao(String descricao) {
-        this.descricao = descricao;
-    }
-
-    public BigDecimal getVlSaldoInicial() {
-        return vlSaldoInicial;
-    }
-
-    public void setVlSaldoInicial(BigDecimal vlSaldoInicial) {
-        this.vlSaldoInicial = vlSaldoInicial;
-    }
-
-    public BigDecimal getVlSaldoFinal() {
-        return vlSaldoFinal;
-    }
-
-    public void setVlSaldoFinal(BigDecimal vlSaldoFinal) {
-        this.vlSaldoFinal = vlSaldoFinal;
-    }
+    public BigDecimal getVlSaldoFinal() { return vlSaldoFinal; }
+    public void setVlSaldoFinal(BigDecimal vlSaldoFinal) { this.vlSaldoFinal = vlSaldoFinal; }
 }
