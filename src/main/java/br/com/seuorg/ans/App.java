@@ -15,6 +15,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.text.Normalizer;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Consumer;
@@ -25,19 +28,24 @@ import java.util.zip.ZipOutputStream;
 public class App {
 
     private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
+    private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
-            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ DA OPERADORA", "CNPJ OPERADORA"),
-            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME", "NOME_OPERADORA", "RAZAO_SOCIAL", "RAZAO SOCIAL DA OPERADORA", "RAZAO SOCIAL OPERADORA"),
-            "Trimestre", List.of("TRIMESTRE", "TRIM", "TRIMESTRE_REFERENCIA", "TRIMESTRE REFERENCIA"),
-            "Ano", List.of("ANO", "ANO_REFERENCIA", "ANO REF", "ANO_REFERENCIA"),
-            "ValorDespesas", List.of("VALOR DESPESAS", "VL_DESPESA", "VL_DESPESAS", "VALOR", "VALOR_EVENTOS_SINISTROS", "DESPESAS", "DESPESAS COM EVENTOS SINISTROS", "DESPESA EVENTOS SINISTROS", "DESPESAS EVENTOS SINISTROS")
+            "RegistroANS", List.of("REG_ANS", "REGANS", "REGISTRO ANS"),
+            "Data", List.of("DATA", "DT_REF", "DATA_REFERENCIA", "DATA REFERENCIA"),
+            "ContaContabil", List.of("CD_CONTA_CONTABIL", "CONTA_CONTABIL", "CONTA CONTABIL"),
+            "Descricao", List.of("DESCRICAO", "DESCR", "DESCRIÇÃO"),
+            "ValorDespesas", List.of("VL_SALDO_FINAL", "VL_SALDO", "VALOR", "VALOR DESPESA", "VL_DESPESA")
     );
     private static final List<String> COLUNAS_SAIDA = List.of(
-            "CNPJ",
-            "RazaoSocial",
-            "Trimestre",
+            "RegistroANS",
             "Ano",
+            "Trimestre",
             "ValorDespesas"
+    );
+    private static final List<DateTimeFormatter> FORMATOS_DATA = List.of(
+            DateTimeFormatter.ofPattern("dd/MM/uuuu"),
+            DateTimeFormatter.ofPattern("uuuu-MM-dd"),
+            DateTimeFormatter.ofPattern("dd-MM-uuuu")
     );
 
     public static void main(String[] args) throws Exception {
@@ -100,12 +108,12 @@ public class App {
         try (var stream = Files.walk(dir)) {
             List<Path> arquivos = new ArrayList<>();
             for (Path path : stream.filter(Files::isRegularFile).toList()) {
-                if (fileContainsPhrase(path, FRASE_DESPESAS)) {
+                if (detectFileType(path) != FileType.UNKNOWN) {
                     arquivos.add(path);
                 }
             }
             if (arquivos.isEmpty()) {
-                throw new IllegalStateException("Nenhum arquivo com \"" + FRASE_DESPESAS + "\" encontrado.");
+                throw new IllegalStateException("Nenhum arquivo de despesas encontrado.");
             }
             return arquivos;
         }
@@ -138,89 +146,13 @@ public class App {
         return FileType.UNKNOWN;
     }
 
-    private static boolean fileContainsPhrase(Path arquivo, String phrase) {
-        FileType tipo = detectFileType(arquivo);
-        try {
-            return switch (tipo) {
-                case CSV, TXT -> fileContainsPhraseInText(arquivo, phrase);
-                case XLSX -> fileContainsPhraseInXlsx(arquivo, phrase);
-                default -> false;
-            };
-        } catch (IOException | InvalidFormatException e) {
-            return false;
-        }
-    }
-
-    private static boolean fileContainsPhraseInText(Path arquivo, String phrase) throws IOException {
-        CsvMapper mapper = new CsvMapper();
-        char separador = detectarSeparador(arquivo);
-        CsvSchema schema = CsvSchema.emptySchema()
-                .withHeader()
-                .withColumnSeparator(separador);
-
-        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
-            MappingIterator<Map<String, String>> it =
-                    mapper.readerFor(Map.class)
-                            .with(schema)
-                            .readValues(reader);
-            String colunaDescricao = null;
-            while (it.hasNext()) {
-                Map<String, String> row = it.next();
-                if (colunaDescricao == null) {
-                    colunaDescricao = findDescricaoHeader(row.keySet());
-                    if (colunaDescricao == null) {
-                        return false;
-                    }
-                }
-                String descricao = row.get(colunaDescricao);
-                if (descricao != null && descricao.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean fileContainsPhraseInXlsx(Path arquivo, String phrase) throws IOException, InvalidFormatException {
-        try (InputStream in = Files.newInputStream(arquivo);
-             Workbook workbook = WorkbookFactory.create(in)) {
-            DataFormatter formatter = new DataFormatter();
-            for (Sheet sheet : workbook) {
-                Iterator<Row> rows = sheet.iterator();
-                if (!rows.hasNext()) {
-                    continue;
-                }
-                Row headerRow = rows.next();
-                Integer colunaDescricao = null;
-                for (Cell cell : headerRow) {
-                    String header = formatter.formatCellValue(cell);
-                    if (normalizeHeader("DESCRICAO").equals(normalizeHeader(header))) {
-                        colunaDescricao = cell.getColumnIndex();
-                        break;
-                    }
-                }
-                if (colunaDescricao == null) {
-                    continue;
-                }
-                while (rows.hasNext()) {
-                    Row row = rows.next();
-                    Cell cell = row.getCell(colunaDescricao);
-                    String value = cell == null ? null : formatter.formatCellValue(cell);
-                    if (value != null && value.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-    }
-
     private static void parseDelimitedFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException {
         CsvMapper mapper = new CsvMapper();
         char separador = detectarSeparador(arquivo);
         CsvSchema schema = CsvSchema.emptySchema()
                 .withHeader()
-                .withColumnSeparator(separador);
+                .withColumnSeparator(separador)
+                .withQuoteChar('"');
 
         try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
             MappingIterator<Map<String, String>> it =
@@ -275,20 +207,29 @@ public class App {
     }
 
     private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
-        String cnpj = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("CNPJ"));
-        String razaoSocial = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RazaoSocial"));
-        String trimestre = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Trimestre"));
-        String anoStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Ano"));
+        String registroAns = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RegistroANS"));
+        String dataStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Data"));
+        String contaContabil = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ContaContabil"));
+        String descricao = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Descricao"));
         String valorStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ValorDespesas"));
-        if (cnpj == null && razaoSocial == null && trimestre == null && anoStr == null && valorStr == null) {
+        if (registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
+            return null;
+        }
+        if (!isDespesaEvento(contaContabil, descricao)) {
+            return null;
+        }
+        LocalDate dataReferencia = parseData(dataStr);
+        if (dataReferencia == null) {
             return null;
         }
         DespesaEvento evento = new DespesaEvento();
-        evento.setCnpj(normalizeValue(cnpj));
-        evento.setRazaoSocial(normalizeValue(razaoSocial));
-        evento.setTrimestre(normalizeValue(trimestre));
-        evento.setAno(parseInteger(normalizeValue(anoStr)));
+        evento.setRegistroAns(normalizeValue(registroAns));
+        evento.setAno(dataReferencia.getYear());
+        evento.setTrimestre(trimestreFromMonth(dataReferencia.getMonthValue()));
         evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
+        if (evento.getRegistroAns() == null || evento.getValorDespesas() == null) {
+            return null;
+        }
         return evento;
     }
 
@@ -301,19 +242,6 @@ public class App {
             lookup.put(normalizeHeader(header), header);
         }
         return lookup;
-    }
-
-    private static String findDescricaoHeader(Collection<String> headers) {
-        String target = normalizeHeader("DESCRICAO");
-        for (String header : headers) {
-            if (header == null) {
-                continue;
-            }
-            if (target.equals(normalizeHeader(header))) {
-                return header;
-            }
-        }
-        return null;
     }
 
     private static String getValueByAliases(Map<String, String> row, Map<String, String> headerLookup, List<String> aliases) {
@@ -367,17 +295,6 @@ public class App {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private static Integer parseInteger(String value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            return Integer.parseInt(value.replaceAll("\\D", ""));
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     private static BigDecimal parseBigDecimal(String value) {
         if (value == null) {
             return null;
@@ -388,6 +305,42 @@ public class App {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    private static LocalDate parseData(String value) {
+        String normalized = normalizeValue(value);
+        if (normalized == null) {
+            return null;
+        }
+        for (DateTimeFormatter formatter : FORMATOS_DATA) {
+            try {
+                return LocalDate.parse(normalized, formatter);
+            } catch (DateTimeParseException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String trimestreFromMonth(int month) {
+        int trimestre = (month - 1) / 3 + 1;
+        return trimestre + "T";
+    }
+
+    private static boolean isDespesaEvento(String contaContabil, String descricao) {
+        String descricaoNormalizada = normalizeHeader(descricao == null ? "" : descricao);
+        String fraseNormalizada = normalizeHeader(FRASE_DESPESAS);
+        if (descricaoNormalizada.contains(fraseNormalizada)) {
+            return true;
+        }
+        String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
+        // Critério adotado: aceitar registros cuja descrição mencione "Despesas com Eventos/Sinistros"
+        // OU cuja conta contábil esteja sob o prefixo 3.04.01.04 (contas de eventos/sinistros).
+        for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
+            if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static char detectarSeparador(Path arquivo) throws IOException {
@@ -424,7 +377,10 @@ public class App {
         for (String coluna : COLUNAS_SAIDA) {
             schemaBuilder.addColumn(coluna);
         }
-        CsvSchema schema = schemaBuilder.setUseHeader(true).build();
+        CsvSchema schema = schemaBuilder.setUseHeader(true)
+                .setColumnSeparator(';')
+                .setQuoteChar('"')
+                .build();
 
         try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
              SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
@@ -449,7 +405,7 @@ public class App {
             unzip(zip, extractDir);
 
             List<Path> arquivos = findArquivosComDespesas(extractDir);
-            System.out.println("Arquivos encontrados com \"" + FRASE_DESPESAS + "\" em " + info.trimestre() + ": " + arquivos.size());
+            System.out.println("Arquivos encontrados em " + info.trimestre() + ": " + arquivos.size());
             for (Path arquivo : arquivos) {
                 parseArquivoDespesas(arquivo, consumer);
             }
@@ -458,10 +414,9 @@ public class App {
 
     private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
         Map<String, Object> linha = new LinkedHashMap<>();
-        linha.put("CNPJ", evento.getCnpj());
-        linha.put("RazaoSocial", evento.getRazaoSocial());
-        linha.put("Trimestre", evento.getTrimestre());
+        linha.put("RegistroANS", evento.getRegistroAns());
         linha.put("Ano", evento.getAno());
+        linha.put("Trimestre", evento.getTrimestre());
         linha.put("ValorDespesas", evento.getValorDespesas() == null ? null : evento.getValorDespesas().toPlainString());
         try {
             writer.write(linha);
