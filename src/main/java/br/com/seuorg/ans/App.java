@@ -3,19 +3,32 @@ package br.com.seuorg.ans;
 import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.ss.usermodel.*;
 
 import java.io.*;
 import java.net.URI;
 import java.net.http.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.text.Normalizer;
 import java.time.Duration;
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public class App {
+
+    private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
+    private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
+            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ DA OPERADORA"),
+            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME", "NOME_OPERADORA", "RAZAO_SOCIAL"),
+            "Trimestre", List.of("TRIMESTRE", "TRIM", "TRIMESTRE_REFERENCIA", "TRIMESTRE REFERENCIA"),
+            "Ano", List.of("ANO", "ANO_REFERENCIA", "ANO REF", "ANO_REFERENCIA"),
+            "ValorDespesas", List.of("VALOR DESPESAS", "VL_DESPESA", "VL_DESPESAS", "VALOR", "VALOR_EVENTOS_SINISTROS", "DESPESAS")
+    );
 
     public static void main(String[] args) throws Exception {
 
@@ -46,15 +59,19 @@ public class App {
         System.out.println("Extraindo ZIP...");
         unzip(zip, extractDir);
 
-        Path csv = findCsv(extractDir);
-        System.out.println("CSV encontrado: " + csv);
+        List<Path> arquivos = findArquivosComDespesas(extractDir);
+        System.out.println("Arquivos encontrados com \"" + FRASE_DESPESAS + "\": " + arquivos.size());
+        arquivos.forEach(p -> System.out.println(" - " + p));
 
-        System.out.println("Lendo CSV...");
-        List<Trimestres> lista = parseCsv(csv);
+        System.out.println("Lendo arquivos...");
+        List<DespesaEvento> lista = new ArrayList<>();
+        for (Path arquivo : arquivos) {
+            lista.addAll(parseArquivoDespesas(arquivo));
+        }
 
         System.out.println("Total de registros: " + lista.size());
         lista.stream().limit(3).forEach(t ->
-                System.out.println(t.getData() + " | " + t.getVlSaldoFinal())
+                System.out.println(t.getCnpj() + " | " + t.getRazaoSocial() + " | " + t.getAno() + " | " + t.getTrimestre() + " | " + t.getValorDespesas())
         );
     }
 
@@ -89,31 +106,267 @@ public class App {
         }
     }
 
-    private static Path findCsv(Path dir) throws IOException {
+    private static List<Path> findArquivosComDespesas(Path dir) throws IOException {
         try (var stream = Files.walk(dir)) {
-            return stream
-                    .filter(p -> p.toString().endsWith(".csv"))
-                    .findFirst()
-                    .orElseThrow();
+            List<Path> arquivos = new ArrayList<>();
+            for (Path path : stream.filter(Files::isRegularFile).toList()) {
+                if (fileContainsPhrase(path, FRASE_DESPESAS)) {
+                    arquivos.add(path);
+                }
+            }
+            if (arquivos.isEmpty()) {
+                throw new IllegalStateException("Nenhum arquivo com \"" + FRASE_DESPESAS + "\" encontrado.");
+            }
+            return arquivos;
         }
     }
 
-    private static List<Trimestres> parseCsv(Path csv) throws IOException {
+    private static List<DespesaEvento> parseArquivoDespesas(Path arquivo) throws IOException, InvalidFormatException {
+        FileType tipo = detectFileType(arquivo);
+        return switch (tipo) {
+            case CSV, TXT -> parseDelimitedFile(arquivo);
+            case XLSX -> parseXlsxFile(arquivo);
+            default -> List.of();
+        };
+    }
 
+    private static FileType detectFileType(Path arquivo) {
+        String nome = arquivo.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (nome.endsWith(".csv")) {
+            return FileType.CSV;
+        }
+        if (nome.endsWith(".txt")) {
+            return FileType.TXT;
+        }
+        try (InputStream in = Files.newInputStream(arquivo)) {
+            try (Workbook ignored = WorkbookFactory.create(in)) {
+                return FileType.XLSX;
+            }
+        } catch (IOException | InvalidFormatException ignored) {
+        }
+        return FileType.UNKNOWN;
+    }
+
+    private static boolean fileContainsPhrase(Path arquivo, String phrase) {
+        FileType tipo = detectFileType(arquivo);
+        try {
+            return switch (tipo) {
+                case CSV, TXT -> fileContainsPhraseInText(arquivo, phrase);
+                case XLSX -> fileContainsPhraseInXlsx(arquivo, phrase);
+                default -> false;
+            };
+        } catch (IOException | InvalidFormatException e) {
+            return false;
+        }
+    }
+
+    private static boolean fileContainsPhraseInText(Path arquivo, String phrase) throws IOException {
+        try (BufferedReader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
+            String linha;
+            while ((linha = reader.readLine()) != null) {
+                if (linha.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static boolean fileContainsPhraseInXlsx(Path arquivo, String phrase) throws IOException, InvalidFormatException {
+        try (InputStream in = Files.newInputStream(arquivo);
+             Workbook workbook = WorkbookFactory.create(in)) {
+            DataFormatter formatter = new DataFormatter();
+            for (Sheet sheet : workbook) {
+                for (Row row : sheet) {
+                    for (Cell cell : row) {
+                        String value = formatter.formatCellValue(cell);
+                        if (value != null && value.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    private static List<DespesaEvento> parseDelimitedFile(Path arquivo) throws IOException {
         CsvMapper mapper = new CsvMapper();
-        mapper.registerModule(new JavaTimeModule());
-
+        char separador = detectarSeparador(arquivo);
         CsvSchema schema = CsvSchema.emptySchema()
                 .withHeader()
-                .withColumnSeparator(';');
+                .withColumnSeparator(separador);
 
-        try (Reader reader = Files.newBufferedReader(csv, StandardCharsets.UTF_8)) {
-            MappingIterator<Trimestres> it =
-                    mapper.readerFor(Trimestres.class)
+        List<DespesaEvento> resultados = new ArrayList<>();
+        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
+            MappingIterator<Map<String, String>> it =
+                    mapper.readerFor(Map.class)
                             .with(schema)
                             .readValues(reader);
 
-            return it.readAll();
+            Map<String, String> headerLookup = null;
+            while (it.hasNext()) {
+                Map<String, String> row = it.next();
+                if (headerLookup == null) {
+                    headerLookup = buildHeaderLookup(row.keySet());
+                }
+                DespesaEvento evento = mapRow(row, headerLookup);
+                if (evento != null) {
+                    resultados.add(evento);
+                }
+            }
         }
+        return resultados;
+    }
+
+    private static List<DespesaEvento> parseXlsxFile(Path arquivo) throws IOException, InvalidFormatException {
+        List<DespesaEvento> resultados = new ArrayList<>();
+        try (InputStream in = Files.newInputStream(arquivo);
+             Workbook workbook = WorkbookFactory.create(in)) {
+            DataFormatter formatter = new DataFormatter();
+            for (Sheet sheet : workbook) {
+                Iterator<Row> rows = sheet.iterator();
+                if (!rows.hasNext()) {
+                    continue;
+                }
+                Row headerRow = rows.next();
+                Map<Integer, String> headerPorColuna = new HashMap<>();
+                for (Cell cell : headerRow) {
+                    headerPorColuna.put(cell.getColumnIndex(), formatter.formatCellValue(cell));
+                }
+                Map<String, String> headerLookup = buildHeaderLookup(headerPorColuna.values());
+                while (rows.hasNext()) {
+                    Row row = rows.next();
+                    Map<String, String> values = new HashMap<>();
+                    for (Map.Entry<Integer, String> entry : headerPorColuna.entrySet()) {
+                        Cell cell = row.getCell(entry.getKey());
+                        String value = cell == null ? null : formatter.formatCellValue(cell);
+                        values.put(entry.getValue(), value);
+                    }
+                    DespesaEvento evento = mapRow(values, headerLookup);
+                    if (evento != null) {
+                        resultados.add(evento);
+                    }
+                }
+            }
+        }
+        return resultados;
+    }
+
+    private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
+        String cnpj = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("CNPJ"));
+        String razaoSocial = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RazaoSocial"));
+        String trimestre = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Trimestre"));
+        String anoStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Ano"));
+        String valorStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ValorDespesas"));
+        if (cnpj == null && razaoSocial == null && trimestre == null && anoStr == null && valorStr == null) {
+            return null;
+        }
+        DespesaEvento evento = new DespesaEvento();
+        evento.setCnpj(normalizeValue(cnpj));
+        evento.setRazaoSocial(normalizeValue(razaoSocial));
+        evento.setTrimestre(normalizeValue(trimestre));
+        evento.setAno(parseInteger(normalizeValue(anoStr)));
+        evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
+        return evento;
+    }
+
+    private static Map<String, String> buildHeaderLookup(Collection<String> headers) {
+        Map<String, String> lookup = new HashMap<>();
+        for (String header : headers) {
+            if (header == null) {
+                continue;
+            }
+            lookup.put(normalizeHeader(header), header);
+        }
+        return lookup;
+    }
+
+    private static String getValueByAliases(Map<String, String> row, Map<String, String> headerLookup, List<String> aliases) {
+        if (aliases == null) {
+            return null;
+        }
+        for (String alias : aliases) {
+            String normalized = normalizeHeader(alias);
+            String header = headerLookup.get(normalized);
+            if (header != null) {
+                String value = row.get(header);
+                if (value != null && !value.isBlank()) {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String normalizeHeader(String header) {
+        String normalized = Normalizer.normalize(header, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .toUpperCase(Locale.ROOT);
+        return normalized.replaceAll("[^A-Z0-9]", "");
+    }
+
+    private static String normalizeValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static Integer parseInteger(String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.replaceAll("\\D", ""));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static BigDecimal parseBigDecimal(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.replace(".", "").replace(",", ".");
+        try {
+            return new BigDecimal(normalized);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static char detectarSeparador(Path arquivo) throws IOException {
+        try (BufferedReader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
+            String header = reader.readLine();
+            if (header == null) {
+                return ';';
+            }
+            if (header.contains(";")) {
+                return ';';
+            }
+            if (header.contains("\t")) {
+                return '\t';
+            }
+            return ',';
+        }
+    }
+
+    private static Charset detectCharset(Path arquivo) throws IOException {
+        try (InputStream in = Files.newInputStream(arquivo)) {
+            byte[] bom = in.readNBytes(3);
+            if (bom.length >= 3 && bom[0] == (byte) 0xEF && bom[1] == (byte) 0xBB && bom[2] == (byte) 0xBF) {
+                return StandardCharsets.UTF_8;
+            }
+        }
+        return StandardCharsets.UTF_8;
+    }
+
+    private enum FileType {
+        CSV,
+        TXT,
+        XLSX,
+        UNKNOWN
     }
 }
