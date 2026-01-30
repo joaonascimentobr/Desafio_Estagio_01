@@ -1,6 +1,7 @@
 package br.com.seuorg.ans;
 
 import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.SequenceWriter;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
@@ -16,8 +17,10 @@ import java.text.Normalizer;
 import java.time.Duration;
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 public class App {
 
@@ -28,6 +31,13 @@ public class App {
             "Trimestre", List.of("TRIMESTRE", "TRIM", "TRIMESTRE_REFERENCIA", "TRIMESTRE REFERENCIA"),
             "Ano", List.of("ANO", "ANO_REFERENCIA", "ANO REF", "ANO_REFERENCIA"),
             "ValorDespesas", List.of("VALOR DESPESAS", "VL_DESPESA", "VL_DESPESAS", "VALOR", "VALOR_EVENTOS_SINISTROS", "DESPESAS")
+    );
+    private static final List<String> COLUNAS_SAIDA = List.of(
+            "CNPJ",
+            "RazaoSocial",
+            "Trimestre",
+            "Ano",
+            "ValorDespesas"
     );
 
     public static void main(String[] args) throws Exception {
@@ -46,33 +56,13 @@ public class App {
             System.out.println(info.trimestre() + " -> " + info.urls());
         }
 
-        TrimestresFinder.TrimestreInfo maisRecente = recentes.get(0);
-        URI zipUrl = maisRecente.urls().getFirst();
+        Path csvSaida = baseDir.resolve("consolidado_despesas.csv");
+        Path zipSaida = baseDir.resolve("consolidado_despesas.zip");
 
-        String zipName = Paths.get(zipUrl.getPath()).getFileName().toString();
-        Path zip = baseDir.resolve(zipName);
-        Path extractDir = baseDir.resolve(maisRecente.trimestre());
-
-        System.out.println("Baixando ZIP...");
-        download(zipUrl.toString(), zip);
-
-        System.out.println("Extraindo ZIP...");
-        unzip(zip, extractDir);
-
-        List<Path> arquivos = findArquivosComDespesas(extractDir);
-        System.out.println("Arquivos encontrados com \"" + FRASE_DESPESAS + "\": " + arquivos.size());
-        arquivos.forEach(p -> System.out.println(" - " + p));
-
-        System.out.println("Lendo arquivos...");
-        List<DespesaEvento> lista = new ArrayList<>();
-        for (Path arquivo : arquivos) {
-            lista.addAll(parseArquivoDespesas(arquivo));
-        }
-
-        System.out.println("Total de registros: " + lista.size());
-        lista.stream().limit(3).forEach(t ->
-                System.out.println(t.getCnpj() + " | " + t.getRazaoSocial() + " | " + t.getAno() + " | " + t.getTrimestre() + " | " + t.getValorDespesas())
-        );
+        System.out.println("Gerando consolidado em " + csvSaida + "...");
+        gerarConsolidado(recentes, baseDir, csvSaida);
+        System.out.println("Compactando consolidado em " + zipSaida + "...");
+        compactarCsv(csvSaida, zipSaida);
     }
 
     private static void download(String url, Path dest) throws Exception {
@@ -121,12 +111,13 @@ public class App {
         }
     }
 
-    private static List<DespesaEvento> parseArquivoDespesas(Path arquivo) throws IOException, InvalidFormatException {
+    private static void parseArquivoDespesas(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException, InvalidFormatException {
         FileType tipo = detectFileType(arquivo);
-        return switch (tipo) {
-            case CSV, TXT -> parseDelimitedFile(arquivo);
-            case XLSX -> parseXlsxFile(arquivo);
-            default -> List.of();
+        switch (tipo) {
+            case CSV, TXT -> parseDelimitedFile(arquivo, consumer);
+            case XLSX -> parseXlsxFile(arquivo, consumer);
+            default -> {
+            }
         };
     }
 
@@ -224,14 +215,13 @@ public class App {
         }
     }
 
-    private static List<DespesaEvento> parseDelimitedFile(Path arquivo) throws IOException {
+    private static void parseDelimitedFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException {
         CsvMapper mapper = new CsvMapper();
         char separador = detectarSeparador(arquivo);
         CsvSchema schema = CsvSchema.emptySchema()
                 .withHeader()
                 .withColumnSeparator(separador);
 
-        List<DespesaEvento> resultados = new ArrayList<>();
         try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
             MappingIterator<Map<String, String>> it =
                     mapper.readerFor(Map.class)
@@ -246,15 +236,13 @@ public class App {
                 }
                 DespesaEvento evento = mapRow(row, headerLookup);
                 if (evento != null) {
-                    resultados.add(evento);
+                    consumer.accept(evento);
                 }
             }
         }
-        return resultados;
     }
 
-    private static List<DespesaEvento> parseXlsxFile(Path arquivo) throws IOException, InvalidFormatException {
-        List<DespesaEvento> resultados = new ArrayList<>();
+    private static void parseXlsxFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException, InvalidFormatException {
         try (InputStream in = Files.newInputStream(arquivo);
              Workbook workbook = WorkbookFactory.create(in)) {
             DataFormatter formatter = new DataFormatter();
@@ -279,12 +267,11 @@ public class App {
                     }
                     DespesaEvento evento = mapRow(values, headerLookup);
                     if (evento != null) {
-                        resultados.add(evento);
+                        consumer.accept(evento);
                     }
                 }
             }
         }
-        return resultados;
     }
 
     private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
@@ -408,6 +395,69 @@ public class App {
             }
         }
         return StandardCharsets.UTF_8;
+    }
+
+    private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
+                                         Path baseDir,
+                                         Path csvSaida) throws Exception {
+        CsvMapper mapper = new CsvMapper();
+        CsvSchema.Builder schemaBuilder = CsvSchema.builder();
+        for (String coluna : COLUNAS_SAIDA) {
+            schemaBuilder.addColumn(coluna);
+        }
+        CsvSchema schema = schemaBuilder.setUseHeader(true).build();
+
+        try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
+             SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
+            for (TrimestresFinder.TrimestreInfo info : trimestres) {
+                processarTrimestre(info, baseDir, evento -> escreverEvento(sequenceWriter, evento));
+            }
+        }
+    }
+
+    private static void processarTrimestre(TrimestresFinder.TrimestreInfo info,
+                                           Path baseDir,
+                                           Consumer<DespesaEvento> consumer) throws Exception {
+        for (URI zipUrl : info.urls()) {
+            String zipName = Paths.get(zipUrl.getPath()).getFileName().toString();
+            Path zip = baseDir.resolve(info.trimestre() + "-" + zipName);
+            Path extractDir = baseDir.resolve(info.trimestre()).resolve(zipName.replace(".zip", ""));
+
+            System.out.println("Baixando ZIP " + zipUrl + "...");
+            download(zipUrl.toString(), zip);
+
+            System.out.println("Extraindo ZIP " + zip + "...");
+            unzip(zip, extractDir);
+
+            List<Path> arquivos = findArquivosComDespesas(extractDir);
+            System.out.println("Arquivos encontrados com \"" + FRASE_DESPESAS + "\" em " + info.trimestre() + ": " + arquivos.size());
+            for (Path arquivo : arquivos) {
+                parseArquivoDespesas(arquivo, consumer);
+            }
+        }
+    }
+
+    private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
+        Map<String, Object> linha = new LinkedHashMap<>();
+        linha.put("CNPJ", evento.getCnpj());
+        linha.put("RazaoSocial", evento.getRazaoSocial());
+        linha.put("Trimestre", evento.getTrimestre());
+        linha.put("Ano", evento.getAno());
+        linha.put("ValorDespesas", evento.getValorDespesas() == null ? null : evento.getValorDespesas().toPlainString());
+        try {
+            writer.write(linha);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void compactarCsv(Path csv, Path zipDestino) throws IOException {
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipDestino))) {
+            ZipEntry entry = new ZipEntry(csv.getFileName().toString());
+            zos.putNextEntry(entry);
+            Files.copy(csv, zos);
+            zos.closeEntry();
+        }
     }
 
     private enum FileType {
