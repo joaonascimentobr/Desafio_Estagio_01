@@ -17,19 +17,31 @@ import java.util.zip.ZipInputStream;
 
 public class App {
 
-    private static final String ZIP_URL =
-            "https://dadosabertos.ans.gov.br/FTP/PDA/demonstracoes_contabeis/2025/1T2025.zip";
-
     public static void main(String[] args) throws Exception {
 
         Path baseDir = Paths.get("target", "ans");
         Files.createDirectories(baseDir);
 
-        Path zip = baseDir.resolve("1T2025.zip");
-        Path extractDir = baseDir.resolve("1T2025");
+        TrimestresFinder finder = new TrimestresFinder();
+        List<TrimestresFinder.TrimestreInfo> recentes = finder.findRecentTrimestres(3);
+        if (recentes.isEmpty()) {
+            throw new IllegalStateException("Nenhum trimestre encontrado no FTP da ANS.");
+        }
+
+        System.out.println("Trimestres mais recentes encontrados:");
+        for (TrimestresFinder.TrimestreInfo info : recentes) {
+            System.out.println(info.trimestre() + " -> " + info.urls());
+        }
+
+        TrimestresFinder.TrimestreInfo maisRecente = recentes.get(0);
+        URI zipUrl = maisRecente.urls().getFirst();
+
+        String zipName = Paths.get(zipUrl.getPath()).getFileName().toString();
+        Path zip = baseDir.resolve(zipName);
+        Path extractDir = baseDir.resolve(maisRecente.trimestre());
 
         System.out.println("Baixando ZIP...");
-        download(ZIP_URL, zip);
+        download(zipUrl.toString(), zip);
 
         System.out.println("Extraindo ZIP...");
         unzip(zip, extractDir);
