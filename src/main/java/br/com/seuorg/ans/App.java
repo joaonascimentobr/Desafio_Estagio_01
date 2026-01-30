@@ -26,11 +26,11 @@ public class App {
 
     private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
-            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ DA OPERADORA"),
-            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME", "NOME_OPERADORA", "RAZAO_SOCIAL"),
+            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ DA OPERADORA", "CNPJ OPERADORA"),
+            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME", "NOME_OPERADORA", "RAZAO_SOCIAL", "RAZAO SOCIAL DA OPERADORA", "RAZAO SOCIAL OPERADORA"),
             "Trimestre", List.of("TRIMESTRE", "TRIM", "TRIMESTRE_REFERENCIA", "TRIMESTRE REFERENCIA"),
             "Ano", List.of("ANO", "ANO_REFERENCIA", "ANO REF", "ANO_REFERENCIA"),
-            "ValorDespesas", List.of("VALOR DESPESAS", "VL_DESPESA", "VL_DESPESAS", "VALOR", "VALOR_EVENTOS_SINISTROS", "DESPESAS")
+            "ValorDespesas", List.of("VALOR DESPESAS", "VL_DESPESA", "VL_DESPESAS", "VALOR", "VALOR_EVENTOS_SINISTROS", "DESPESAS", "DESPESAS COM EVENTOS SINISTROS", "DESPESA EVENTOS SINISTROS", "DESPESAS EVENTOS SINISTROS")
     );
     private static final List<String> COLUNAS_SAIDA = List.of(
             "CNPJ",
@@ -325,6 +325,25 @@ public class App {
             String header = headerLookup.get(normalized);
             if (header != null) {
                 String value = row.get(header);
+                if (value != null && !value.isBlank()) {
+                    return value;
+                }
+            }
+            String valueFromSimilar = findValueBySimilarHeader(row, headerLookup, normalized);
+            if (valueFromSimilar != null) {
+                return valueFromSimilar;
+            }
+        }
+        return null;
+    }
+
+    private static String findValueBySimilarHeader(Map<String, String> row,
+                                                   Map<String, String> headerLookup,
+                                                   String normalizedAlias) {
+        for (Map.Entry<String, String> entry : headerLookup.entrySet()) {
+            String normalizedHeader = entry.getKey();
+            if (normalizedHeader.contains(normalizedAlias) || normalizedAlias.contains(normalizedHeader)) {
+                String value = row.get(entry.getValue());
                 if (value != null && !value.isBlank()) {
                     return value;
                 }
