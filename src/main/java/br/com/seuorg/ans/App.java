@@ -142,7 +142,7 @@ public class App {
             try (Workbook ignored = WorkbookFactory.create(in)) {
                 return FileType.XLSX;
             }
-        } catch (IOException | InvalidFormatException ignored) {
+        } catch (IOException ignored) {
         }
         return FileType.UNKNOWN;
     }
