@@ -21,6 +21,7 @@ import java.time.format.DateTimeParseException;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -28,6 +29,7 @@ import java.util.zip.ZipOutputStream;
 public class App {
 
     private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
+    private static final Pattern EVENTOS_SINISTROS_PATTERN = Pattern.compile("\\b(eventos|sinistros)\\b", Pattern.CASE_INSENSITIVE);
     private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
             "RegistroANS", List.of("REG_ANS", "REGANS", "REGISTRO ANS"),
@@ -327,13 +329,12 @@ public class App {
     }
 
     private static boolean isDespesaEvento(String contaContabil, String descricao) {
-        String descricaoNormalizada = normalizeHeader(descricao == null ? "" : descricao);
-        String fraseNormalizada = normalizeHeader(FRASE_DESPESAS);
-        if (descricaoNormalizada.contains(fraseNormalizada)) {
+        String descricaoValor = descricao == null ? "" : descricao;
+        if (EVENTOS_SINISTROS_PATTERN.matcher(descricaoValor).find()) {
             return true;
         }
         String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
-        // Critério adotado: aceitar registros cuja descrição mencione "Despesas com Eventos/Sinistros"
+        // Critério adotado: aceitar registros cuja descrição contenha "Eventos" ou "Sinistros"
         // OU cuja conta contábil esteja sob o prefixo 3.04.01.04 (contas de eventos/sinistros).
         for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
             if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
