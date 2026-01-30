@@ -161,15 +161,33 @@ public class App {
     }
 
     private static boolean fileContainsPhraseInText(Path arquivo, String phrase) throws IOException {
-        try (BufferedReader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
-            String linha;
-            while ((linha = reader.readLine()) != null) {
-                if (linha.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
+        CsvMapper mapper = new CsvMapper();
+        char separador = detectarSeparador(arquivo);
+        CsvSchema schema = CsvSchema.emptySchema()
+                .withHeader()
+                .withColumnSeparator(separador);
+
+        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
+            MappingIterator<Map<String, String>> it =
+                    mapper.readerFor(Map.class)
+                            .with(schema)
+                            .readValues(reader);
+            String colunaDescricao = null;
+            while (it.hasNext()) {
+                Map<String, String> row = it.next();
+                if (colunaDescricao == null) {
+                    colunaDescricao = findDescricaoHeader(row.keySet());
+                    if (colunaDescricao == null) {
+                        return false;
+                    }
+                }
+                String descricao = row.get(colunaDescricao);
+                if (descricao != null && descricao.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
                     return true;
                 }
             }
-            return false;
         }
+        return false;
     }
 
     private static boolean fileContainsPhraseInXlsx(Path arquivo, String phrase) throws IOException, InvalidFormatException {
@@ -177,12 +195,28 @@ public class App {
              Workbook workbook = WorkbookFactory.create(in)) {
             DataFormatter formatter = new DataFormatter();
             for (Sheet sheet : workbook) {
-                for (Row row : sheet) {
-                    for (Cell cell : row) {
-                        String value = formatter.formatCellValue(cell);
-                        if (value != null && value.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
-                            return true;
-                        }
+                Iterator<Row> rows = sheet.iterator();
+                if (!rows.hasNext()) {
+                    continue;
+                }
+                Row headerRow = rows.next();
+                Integer colunaDescricao = null;
+                for (Cell cell : headerRow) {
+                    String header = formatter.formatCellValue(cell);
+                    if (normalizeHeader("DESCRICAO").equals(normalizeHeader(header))) {
+                        colunaDescricao = cell.getColumnIndex();
+                        break;
+                    }
+                }
+                if (colunaDescricao == null) {
+                    continue;
+                }
+                while (rows.hasNext()) {
+                    Row row = rows.next();
+                    Cell cell = row.getCell(colunaDescricao);
+                    String value = cell == null ? null : formatter.formatCellValue(cell);
+                    if (value != null && value.toLowerCase(Locale.ROOT).contains(phrase.toLowerCase(Locale.ROOT))) {
+                        return true;
                     }
                 }
             }
@@ -280,6 +314,19 @@ public class App {
             lookup.put(normalizeHeader(header), header);
         }
         return lookup;
+    }
+
+    private static String findDescricaoHeader(Collection<String> headers) {
+        String target = normalizeHeader("DESCRICAO");
+        for (String header : headers) {
+            if (header == null) {
+                continue;
+            }
+            if (target.equals(normalizeHeader(header))) {
+                return header;
+            }
+        }
+        return null;
     }
 
     private static String getValueByAliases(Map<String, String> row, Map<String, String> headerLookup, List<String> aliases) {
