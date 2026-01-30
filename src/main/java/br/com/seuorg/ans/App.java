@@ -21,6 +21,7 @@ import java.time.format.DateTimeParseException;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -33,22 +34,33 @@ public class App {
     private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
             "RegistroANS", List.of("REG_ANS", "REGANS", "REGISTRO ANS"),
+            "CNPJ", List.of("CNPJ", "CNPJ_PRESTADOR", "CNPJ_PRESTADORA"),
+            "RazaoSocial", List.of("RAZAO_SOCIAL", "RAZÃO_SOCIAL", "RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME_EMPRESA", "PRESTADOR", "PRESTADORA"),
             "Data", List.of("DATA", "DT_REF", "DATA_REFERENCIA", "DATA REFERENCIA"),
+            "Trimestre", List.of("TRIMESTRE", "TRIM", "COMPETENCIA", "COMPETÊNCIA", "PERIODO", "PERÍODO"),
+            "Ano", List.of("ANO", "ANO_REF", "ANO_REFERENCIA", "ANO REFERENCIA"),
             "ContaContabil", List.of("CD_CONTA_CONTABIL", "CONTA_CONTABIL", "CONTA CONTABIL"),
             "Descricao", List.of("DESCRICAO", "DESCR", "DESCRIÇÃO"),
             "ValorDespesas", List.of("VL_SALDO_FINAL", "VL_SALDO", "VALOR", "VALOR DESPESA", "VL_DESPESA")
     );
     private static final List<String> COLUNAS_SAIDA = List.of(
             "RegistroANS",
+            "CNPJ",
+            "RazaoSocial",
             "Ano",
             "Trimestre",
-            "ValorDespesas"
+            "TrimestreReferencia",
+            "ValorDespesas",
+            "StatusValidacao"
     );
     private static final List<DateTimeFormatter> FORMATOS_DATA = List.of(
             DateTimeFormatter.ofPattern("dd/MM/uuuu"),
             DateTimeFormatter.ofPattern("uuuu-MM-dd"),
             DateTimeFormatter.ofPattern("dd-MM-uuuu")
     );
+    private static final Pattern TRIMESTRE_PADRAO = Pattern.compile("(?i)\\b([1-4])\\s*T\\s*(20\\d{2})\\b");
+    private static final Pattern TRIMESTRE_ANO_PRIMEIRO = Pattern.compile("(?i)\\b(20\\d{2})\\s*[-_./ ]*([1-4])\\s*(?:T|TRIMESTRE|TRIM)?\\b");
+    private static final Pattern TRIMESTRE_TEXTO = Pattern.compile("(?i)\\b([1-4])\\s*[-_./ ]*\\s*(?:T|TRIMESTRE|TRIM)?\\s*[-_./ ]*\\s*(20\\d{2})\\b");
 
     public static void main(String[] args) throws Exception {
 
@@ -69,8 +81,10 @@ public class App {
         Path csvSaida = baseDir.resolve("consolidado_despesas.csv");
         Path zipSaida = baseDir.resolve("consolidado_despesas.zip");
 
+        Path relatorioValidacao = baseDir.resolve("relatorio_validacao.csv");
+
         System.out.println("Gerando consolidado em " + csvSaida + "...");
-        gerarConsolidado(recentes, baseDir, csvSaida);
+        gerarConsolidado(recentes, baseDir, csvSaida, relatorioValidacao);
         System.out.println("Compactando consolidado em " + zipSaida + "...");
         compactarCsv(csvSaida, zipSaida);
     }
@@ -210,24 +224,38 @@ public class App {
 
     private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
         String registroAns = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RegistroANS"));
+        String cnpj = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("CNPJ"));
+        String razaoSocial = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RazaoSocial"));
         String dataStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Data"));
+        String trimestreStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Trimestre"));
+        String anoStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Ano"));
         String contaContabil = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ContaContabil"));
         String descricao = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Descricao"));
         String valorStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ValorDespesas"));
-        if (registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
+        if (registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null
+                && trimestreStr == null && anoStr == null && cnpj == null && razaoSocial == null) {
             return null;
         }
         if (!isDespesaEvento(contaContabil, descricao)) {
             return null;
         }
         LocalDate dataReferencia = parseData(dataStr);
-        if (dataReferencia == null) {
-            return null;
-        }
         DespesaEvento evento = new DespesaEvento();
         evento.setRegistroAns(normalizeValue(registroAns));
-        evento.setAno(dataReferencia.getYear());
-        evento.setTrimestre(trimestreFromMonth(dataReferencia.getMonthValue()));
+        evento.setCnpj(normalizeCnpj(cnpj));
+        evento.setRazaoSocial(normalizeRazaoSocial(razaoSocial));
+        if (dataReferencia != null) {
+            evento.setAno(dataReferencia.getYear());
+            evento.setTrimestre(trimestreFromMonth(dataReferencia.getMonthValue()));
+        } else {
+            TrimestreInfo trimestreInfo = parseTrimestreInfo(trimestreStr, anoStr);
+            if (trimestreInfo == null) {
+                return null;
+            }
+            evento.setAno(trimestreInfo.ano());
+            evento.setTrimestre(trimestreInfo.trimestre());
+        }
+        evento.setTrimestreReferencia(normalizeTrimestreReferencia(evento.getTrimestre(), evento.getAno()));
         evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
         if (evento.getRegistroAns() == null || evento.getValorDespesas() == null) {
             return null;
@@ -328,6 +356,92 @@ public class App {
         return trimestre + "T";
     }
 
+    private static TrimestreInfo parseTrimestreInfo(String trimestreRaw, String anoRaw) {
+        String trimestreNormalized = normalizeValue(trimestreRaw);
+        String anoNormalized = normalizeValue(anoRaw);
+        if (trimestreNormalized != null) {
+            TrimestreInfo info = parseTrimestreFromString(trimestreNormalized);
+            if (info != null) {
+                return info;
+            }
+            Integer quarterOnly = parseQuarterOnly(trimestreNormalized);
+            Integer yearOnly = parseYearOnly(anoNormalized);
+            if (quarterOnly != null && yearOnly != null) {
+                return new TrimestreInfo(quarterOnly + "T", yearOnly);
+            }
+        }
+        return null;
+    }
+
+    private static TrimestreInfo parseTrimestreFromString(String value) {
+        Matcher matcher = TRIMESTRE_PADRAO.matcher(value);
+        if (matcher.find()) {
+            return new TrimestreInfo(matcher.group(1) + "T", Integer.parseInt(matcher.group(2)));
+        }
+        matcher = TRIMESTRE_ANO_PRIMEIRO.matcher(value);
+        if (matcher.find()) {
+            return new TrimestreInfo(matcher.group(2) + "T", Integer.parseInt(matcher.group(1)));
+        }
+        matcher = TRIMESTRE_TEXTO.matcher(value);
+        if (matcher.find()) {
+            return new TrimestreInfo(matcher.group(1) + "T", Integer.parseInt(matcher.group(2)));
+        }
+        return null;
+    }
+
+    private static Integer parseQuarterOnly(String value) {
+        String trimmed = normalizeValue(value);
+        if (trimmed == null) {
+            return null;
+        }
+        if (trimmed.matches("[1-4]")) {
+            return Integer.parseInt(trimmed);
+        }
+        return null;
+    }
+
+    private static Integer parseYearOnly(String value) {
+        String trimmed = normalizeValue(value);
+        if (trimmed == null) {
+            return null;
+        }
+        if (trimmed.matches("20\\d{2}")) {
+            return Integer.parseInt(trimmed);
+        }
+        return null;
+    }
+
+    private static String normalizeTrimestreReferencia(String trimestre, Integer ano) {
+        if (trimestre == null || ano == null) {
+            return null;
+        }
+        TrimestreInfo info = parseTrimestreFromString(trimestre);
+        if (info != null) {
+            return info.trimestre() + info.ano();
+        }
+        Matcher trimestreMatcher = Pattern.compile("(?i)\\b([1-4])\\s*T\\b").matcher(trimestre);
+        if (trimestreMatcher.find()) {
+            return trimestreMatcher.group(1) + "T" + ano;
+        }
+        return trimestre + ano;
+    }
+
+    private static String normalizeCnpj(String value) {
+        if (value == null) {
+            return null;
+        }
+        String digits = value.replaceAll("\\D", "");
+        return digits.isEmpty() ? null : digits;
+    }
+
+    private static String normalizeRazaoSocial(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim().replaceAll("\\s+", " ");
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private static boolean isDespesaEvento(String contaContabil, String descricao) {
         String descricaoValor = descricao == null ? "" : descricao;
         if (EVENTOS_SINISTROS_PATTERN.matcher(descricaoValor).find()) {
@@ -372,7 +486,16 @@ public class App {
 
     private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
                                          Path baseDir,
-                                         Path csvSaida) throws Exception {
+                                         Path csvSaida,
+                                         Path relatorioValidacao) throws Exception {
+        List<DespesaEvento> eventos = new ArrayList<>();
+        for (TrimestresFinder.TrimestreInfo info : trimestres) {
+            processarTrimestre(info, baseDir, eventos::add);
+        }
+        Set<String> cnpjsComRazoesDivergentes = identificarCnpjsComRazoesDivergentes(eventos);
+        aplicarValidacoes(eventos, cnpjsComRazoesDivergentes);
+        gerarRelatorioValidacao(relatorioValidacao, cnpjsComRazoesDivergentes, eventos);
+
         CsvMapper mapper = new CsvMapper();
         CsvSchema.Builder schemaBuilder = CsvSchema.builder();
         for (String coluna : COLUNAS_SAIDA) {
@@ -385,8 +508,8 @@ public class App {
 
         try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
              SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
-            for (TrimestresFinder.TrimestreInfo info : trimestres) {
-                processarTrimestre(info, baseDir, evento -> escreverEvento(sequenceWriter, evento));
+            for (DespesaEvento evento : eventos) {
+                escreverEvento(sequenceWriter, evento);
             }
         }
     }
@@ -416,9 +539,13 @@ public class App {
     private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
         Map<String, Object> linha = new LinkedHashMap<>();
         linha.put("RegistroANS", evento.getRegistroAns());
+        linha.put("CNPJ", evento.getCnpj());
+        linha.put("RazaoSocial", evento.getRazaoSocial());
         linha.put("Ano", evento.getAno());
         linha.put("Trimestre", evento.getTrimestre());
+        linha.put("TrimestreReferencia", evento.getTrimestreReferencia());
         linha.put("ValorDespesas", evento.getValorDespesas() == null ? null : evento.getValorDespesas().toPlainString());
+        linha.put("StatusValidacao", evento.getStatusValidacao());
         try {
             writer.write(linha);
         } catch (IOException e) {
@@ -440,5 +567,82 @@ public class App {
         TXT,
         XLSX,
         UNKNOWN
+    }
+
+    private record TrimestreInfo(String trimestre, Integer ano) {}
+
+    private static Set<String> identificarCnpjsComRazoesDivergentes(List<DespesaEvento> eventos) {
+        Map<String, Set<String>> cnpjRazoes = new HashMap<>();
+        for (DespesaEvento evento : eventos) {
+            String cnpj = evento.getCnpj();
+            String razao = evento.getRazaoSocial();
+            if (cnpj == null || razao == null) {
+                continue;
+            }
+            cnpjRazoes.computeIfAbsent(cnpj, key -> new HashSet<>()).add(razao);
+        }
+        Set<String> divergentes = new HashSet<>();
+        for (Map.Entry<String, Set<String>> entry : cnpjRazoes.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                divergentes.add(entry.getKey());
+            }
+        }
+        return divergentes;
+    }
+
+    private static void aplicarValidacoes(List<DespesaEvento> eventos, Set<String> cnpjsDivergentes) {
+        for (DespesaEvento evento : eventos) {
+            List<String> flags = new ArrayList<>();
+            BigDecimal valor = evento.getValorDespesas();
+            if (valor != null && valor.compareTo(BigDecimal.ZERO) <= 0) {
+                flags.add("VALOR_SUSPEITO");
+            }
+            if (evento.getCnpj() != null && cnpjsDivergentes.contains(evento.getCnpj())) {
+                flags.add("CNPJ_DIVERGENTE");
+            }
+            if (flags.isEmpty()) {
+                evento.setStatusValidacao("OK");
+            } else {
+                evento.setStatusValidacao(String.join("|", flags));
+            }
+        }
+    }
+
+    private static void gerarRelatorioValidacao(Path relatorioValidacao,
+                                                Set<String> cnpjsDivergentes,
+                                                List<DespesaEvento> eventos) throws IOException {
+        if (cnpjsDivergentes.isEmpty()) {
+            Files.deleteIfExists(relatorioValidacao);
+            return;
+        }
+        Map<String, Set<String>> razoesPorCnpj = new HashMap<>();
+        for (DespesaEvento evento : eventos) {
+            String cnpj = evento.getCnpj();
+            String razao = evento.getRazaoSocial();
+            if (cnpj == null || razao == null) {
+                continue;
+            }
+            if (cnpjsDivergentes.contains(cnpj)) {
+                razoesPorCnpj.computeIfAbsent(cnpj, key -> new HashSet<>()).add(razao);
+            }
+        }
+        CsvMapper mapper = new CsvMapper();
+        CsvSchema schema = CsvSchema.builder()
+                .addColumn("CNPJ")
+                .addColumn("RazoesSociais")
+                .addColumn("Observacao")
+                .setUseHeader(true)
+                .setColumnSeparator(';')
+                .build();
+        try (Writer writer = Files.newBufferedWriter(relatorioValidacao, StandardCharsets.UTF_8);
+             SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
+            for (Map.Entry<String, Set<String>> entry : razoesPorCnpj.entrySet()) {
+                Map<String, Object> linha = new LinkedHashMap<>();
+                linha.put("CNPJ", entry.getKey());
+                linha.put("RazoesSociais", String.join(" | ", entry.getValue()));
+                linha.put("Observacao", "CNPJ com razoes sociais divergentes");
+                sequenceWriter.write(linha);
+            }
+        }
     }
 }
