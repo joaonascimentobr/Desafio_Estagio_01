@@ -36,7 +36,6 @@ import java.util.zip.ZipOutputStream;
 public class App {
 
     private static final Logger LOGGER = Logger.getLogger(App.class.getName());
-    private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
     private static final Pattern EVENTOS_SINISTROS_PATTERN = Pattern.compile("\\b(eventos|sinistros)\\b", Pattern.CASE_INSENSITIVE);
     private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
@@ -62,7 +61,6 @@ public class App {
     );
 
     public static void main(String[] args) throws Exception {
-
         Path baseDir = Paths.get("target", "ans");
         Files.createDirectories(baseDir);
 
@@ -254,8 +252,12 @@ public class App {
         if (dataReferencia == null) {
             return null;
         }
+        String cnpjNormalizado = normalizeCnpj(cnpj);
+        if (cnpjNormalizado == null) {
+            return null;
+        }
         DespesaEvento evento = new DespesaEvento();
-        evento.setCnpj(normalizeCnpj(cnpj));
+        evento.setCnpj(cnpjNormalizado);
         evento.setRegistroAns(normalizeValue(registroAns));
         evento.setAno(dataReferencia.getYear());
         evento.setTrimestre(formatTrimestre(dataReferencia));
@@ -337,9 +339,8 @@ public class App {
         return digits.length() == 14 ? digits : null;
     }
 
-    private static LocalDate parseData(String value) {
-        String normalized = normalizeValue(value);
-        if (normalized == null) {
+    private static BigDecimal parseBigDecimal(String value) {
+        if (value == null) {
             return null;
         }
         String normalized = normalizeNumber(value);
@@ -348,28 +349,6 @@ public class App {
         } catch (NumberFormatException e) {
             return null;
         }
-        return null;
-    }
-
-    private static String trimestreFromMonth(int month) {
-        int trimestre = (month - 1) / 3 + 1;
-        return trimestre + "T";
-    }
-
-    private static boolean isDespesaEvento(String contaContabil, String descricao) {
-        String descricaoValor = descricao == null ? "" : descricao;
-        if (EVENTOS_SINISTROS_PATTERN.matcher(descricaoValor).find()) {
-            return true;
-        }
-        String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
-        // Critério adotado: aceitar registros cuja descrição contenha "Eventos" ou "Sinistros"
-        // OU cuja conta contábil esteja sob o prefixo 3.04.01.04 (contas de eventos/sinistros).
-        for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
-            if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static LocalDate parseData(String value) {
@@ -546,73 +525,9 @@ public class App {
             zos.closeEntry();
         }
     }
+
     private static String buildDedupeKey(DespesaEvento evento) {
         return evento.getCnpj() + "|" + evento.getAno() + "|" + evento.getTrimestre();
-    }
-
-    private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
-                                         Path baseDir,
-                                         Path csvSaida) throws Exception {
-        CsvMapper mapper = new CsvMapper();
-        CsvSchema.Builder schemaBuilder = CsvSchema.builder();
-        for (String coluna : COLUNAS_SAIDA) {
-            schemaBuilder.addColumn(coluna);
-        }
-        CsvSchema schema = schemaBuilder.setUseHeader(true)
-                .setColumnSeparator(';')
-                .setQuoteChar('"')
-                .build();
-
-        try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
-             SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
-            for (TrimestresFinder.TrimestreInfo info : trimestres) {
-                processarTrimestre(info, baseDir, evento -> escreverEvento(sequenceWriter, evento));
-            }
-        }
-    }
-
-    private static void processarTrimestre(TrimestresFinder.TrimestreInfo info,
-                                           Path baseDir,
-                                           Consumer<DespesaEvento> consumer) throws Exception {
-        for (URI zipUrl : info.urls()) {
-            String zipName = Paths.get(zipUrl.getPath()).getFileName().toString();
-            Path zip = baseDir.resolve(info.trimestre() + "-" + zipName);
-            Path extractDir = baseDir.resolve(info.trimestre()).resolve(zipName.replace(".zip", ""));
-
-            System.out.println("Baixando ZIP " + zipUrl + "...");
-            download(zipUrl.toString(), zip);
-
-            System.out.println("Extraindo ZIP " + zip + "...");
-            unzip(zip, extractDir);
-
-            List<Path> arquivos = findArquivosComDespesas(extractDir);
-            System.out.println("Arquivos encontrados em " + info.trimestre() + ": " + arquivos.size());
-            for (Path arquivo : arquivos) {
-                parseArquivoDespesas(arquivo, consumer);
-            }
-        }
-    }
-
-    private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
-        Map<String, Object> linha = new LinkedHashMap<>();
-        linha.put("RegistroANS", evento.getRegistroAns());
-        linha.put("Ano", evento.getAno());
-        linha.put("Trimestre", evento.getTrimestre());
-        linha.put("ValorDespesas", evento.getValorDespesas() == null ? null : evento.getValorDespesas().toPlainString());
-        try {
-            writer.write(linha);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
-
-    private static void compactarCsv(Path csv, Path zipDestino) throws IOException {
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipDestino))) {
-            ZipEntry entry = new ZipEntry(csv.getFileName().toString());
-            zos.putNextEntry(entry);
-            Files.copy(csv, zos);
-            zos.closeEntry();
-        }
     }
 
     private enum FileType {
@@ -621,5 +536,4 @@ public class App {
         XLSX,
         UNKNOWN
     }
-
 }

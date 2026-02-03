@@ -4,11 +4,8 @@ br/com/seuorg/ans/BigDecimalPtBrDeserializer.class
 br/com/seuorg/ans/service/TransformacaoService$ChaveGrupo.class
 br/com/seuorg/ans/service/TransformacaoService$DespesaEnriquecida.class
 br/com/seuorg/ans/service/TransformacaoService$Estatistica.class
-br/com/seuorg/ans/App$FileType.class
 br/com/seuorg/ans/service/TransformacaoService$ResultadoAgregado.class
 br/com/seuorg/ans/service/TransformacaoService.class
-br/com/seuorg/ans/App.class
 br/com/seuorg/ans/TrimestresFinder$TrimestreInfo.class
 br/com/seuorg/ans/OperadoraCadastro.class
-br/com/seuorg/ans/DespesaEvento.class
 br/com/seuorg/ans/TrimestresFinder.class

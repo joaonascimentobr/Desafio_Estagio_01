@@ -10,8 +10,8 @@ public class DespesaEvento {
     private Integer ano;
     private BigDecimal valorDespesas;
 
-    public String getRegistroAns() {
-        return registroAns;
+    public String getCnpj() {
+        return cnpj;
     }
 
     public void setCnpj(String cnpj) {
