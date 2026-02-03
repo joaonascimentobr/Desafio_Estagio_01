@@ -1,9 +1,4 @@
--- PostgreSQL 10+ DML (Teste 3)
 SET search_path TO ans;
-
--- COPY (operadoras) - ISO-8859-1 e delimitador ';'
--- Ajuste o caminho dos arquivos conforme o ambiente
--- Use psql e COPY (server-side) ou \copy (client-side)
 SET datestyle = 'ISO, DMY';
 
 COPY operadoras_cadastrais (
@@ -29,8 +24,6 @@ COPY operadoras_cadastrais (
 ) FROM '/home/jean/Documents/ans-demonstracoes/target/ans/operadoras_de_plano_de_saude_ativas.csv'
 WITH (FORMAT csv, HEADER true, DELIMITER ';', ENCODING 'ISO-8859-1');
 
--- COPY (despesas consolidadas) - UTF-8 e delimitador ';'
--- CSV gerado pelo Java: CNPJ, RegistroANS, Ano, Trimestre, ValorDespesas
 COPY despesas_consolidadas (
     cnpj,
     registro_ans,

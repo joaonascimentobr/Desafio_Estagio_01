@@ -374,8 +374,6 @@ public class App {
             return true;
         }
         String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
-        // Critério adotado: aceitar registros cuja descrição contenha "Eventos" ou "Sinistros"
-        // OU cuja conta contábil esteja sob o prefixo 3.04.01.04 (contas de eventos/sinistros).
         for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
             if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
                 return true;

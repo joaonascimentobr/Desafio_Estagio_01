@@ -1,4 +1,3 @@
--- PostgreSQL 10+ DDL (Teste 3) - Modelo Normalizado (Opção B)
 BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS ans;

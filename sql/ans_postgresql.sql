@@ -1,8 +1,4 @@
--- PostgreSQL 10+ scripts for ANS data processing (Teste 3)
 
--- =========================
--- 1) DDL - Normalized Model
--- =========================
 BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS ans;
@@ -62,53 +58,13 @@ CREATE TABLE IF NOT EXISTS despesas_agregadas_final (
 CREATE INDEX IF NOT EXISTS idx_agregado_cnpj ON despesas_agregadas_final (cnpj);
 CREATE INDEX IF NOT EXISTS idx_agregado_uf ON despesas_agregadas_final (uf);
 
--- =========================
--- 2) Staging + Error Log
--- =========================
 COMMIT;
 
--- =========================
--- 3) DML - COPY (ISO-8859-1/UTF-8)
--- =========================
 SET datestyle = 'ISO, DMY';
 
--- COPY operadoras_cadastrais (
---     registro_ans,
---     cnpj,
---     razao_social,
---     nome_fantasia,
---     modalidade,
---     logradouro,
---     numero,
---     complemento,
---     bairro,
---     cidade,
---     uf,
---     cep,
---     ddd,
---     telefone,
---     fax,
---     endereco_eletronico,
---     representante,
---     cargo_representante,
---     data_registro_ans
--- ) FROM '/caminho/operadoras_de_plano_de_saude_ativas.csv'
--- WITH (FORMAT csv, HEADER true, DELIMITER ';', ENCODING 'ISO-8859-1');
 
--- COPY despesas_consolidadas (
---     cnpj,
---     registro_ans,
---     ano,
---     trimestre,
---     valor_despesas
--- ) FROM '/caminho/consolidado_despesas.csv'
--- WITH (FORMAT csv, HEADER true, DELIMITER ';', ENCODING 'UTF8');
 
--- =========================
--- 5) Consultas Analíticas
--- =========================
 
--- View: despesas enriquecidas (left join)
 CREATE OR REPLACE VIEW vw_despesas_enriquecidas AS
 SELECT
     d.cnpj,
@@ -123,7 +79,6 @@ FROM ans.despesas_consolidadas d
 LEFT JOIN ans.operadoras_cadastrais o
     ON o.cnpj = d.cnpj;
 
--- Query A: soma total de despesas por modalidade no ultimo trimestre disponivel
 WITH ultimo AS (
     SELECT MAX(ano * 10 + split_part(trimestre, '_', 2)::INT) AS ordem_tri
     FROM ans.despesas_consolidadas
@@ -143,16 +98,13 @@ LEFT JOIN ans.operadoras_cadastrais o
 GROUP BY o.modalidade
 ORDER BY total_modalidade DESC NULLS LAST;
 
--- Query B: operadoras orfas (despesas sem cadastro)
 SELECT DISTINCT d.cnpj
 FROM ans.despesas_consolidadas d
 LEFT JOIN ans.operadoras_cadastrais o
     ON o.cnpj = d.cnpj
 WHERE o.cnpj IS NULL;
 
--- Justificativa: operadoras podem ter ficado inativas ou o cadastro pode estar desatualizado.
 
--- Query 1: 5 operadoras com maior crescimento percentual entre 1o e ultimo trimestre
 WITH ordem AS (
     SELECT
         d.cnpj,
@@ -191,7 +143,6 @@ FROM valores v
 ORDER BY crescimento_percentual DESC NULLS LAST
 LIMIT 5;
 
--- Query 2: 5 UFs com maiores despesas totais + media por operadora
 WITH por_uf AS (
     SELECT
         o.uf,
@@ -207,7 +158,6 @@ FROM por_uf
 ORDER BY total_uf DESC NULLS LAST
 LIMIT 5;
 
--- Query 3: operadoras acima da media geral em >= 2 dos 3 trimestres
 WITH media_geral AS (
     SELECT AVG(valor_despesas) AS media_global
     FROM ans.despesas_consolidadas

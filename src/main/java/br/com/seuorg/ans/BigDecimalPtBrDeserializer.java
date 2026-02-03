@@ -17,7 +17,6 @@ public class BigDecimalPtBrDeserializer extends JsonDeserializer<BigDecimal> {
             return BigDecimal.ZERO;
         }
 
-        // Remove separador de milhar e troca vírgula por ponto
         valor = valor.replace(".", "").replace(",", ".");
 
         return new BigDecimal(valor);
