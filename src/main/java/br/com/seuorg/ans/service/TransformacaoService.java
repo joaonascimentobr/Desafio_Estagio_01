@@ -141,6 +141,7 @@ public class TransformacaoService {
     private Path ensureCadastroOperadoras(Path baseDir) throws Exception {
         Path cadastro = baseDir.resolve("operadoras_de_plano_de_saude_ativas.csv");
         if (Files.exists(cadastro)) {
+            LOGGER.log(Level.INFO, "Cadastro de operadoras encontrado em cache: {0}", cadastro.getFileName());
             return cadastro;
         }
         download(OPERADORAS_ATIVAS_URL, cadastro);

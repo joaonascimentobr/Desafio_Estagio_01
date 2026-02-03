@@ -87,9 +87,14 @@ public class App {
         compactarCsv(csvSaida, zipSaida);
         System.out.println("Gerando agregado em " + csvAgregado + "...");
         new TransformacaoService().gerarDespesasAgregadas(baseDir, csvSaida, csvAgregado);
+        System.out.println("Processamento concluído: " + csvAgregado + " gerado com sucesso");
     }
 
     private static void download(String url, Path dest) throws Exception {
+        if (Files.exists(dest)) {
+            System.out.println("Arquivo já existe, pulando download: " + dest.getFileName());
+            return;
+        }
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .build();
@@ -106,6 +111,14 @@ public class App {
     }
 
     private static void unzip(Path zip, Path dest) throws IOException {
+        if (Files.exists(dest)) {
+            try (var stream = Files.walk(dest)) {
+                if (stream.anyMatch(Files::isRegularFile)) {
+                    System.out.println("Pasta já contém arquivos, pulando extração: " + dest.getFileName());
+                    return;
+                }
+            }
+        }
         try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
