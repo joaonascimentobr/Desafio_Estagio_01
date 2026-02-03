@@ -1,9 +1,12 @@
 package br.com.seuorg.ans;
 
-import com.fasterxml.jackson.databind.MappingIterator;
+import br.com.seuorg.ans.service.TransformacaoService;
 import com.fasterxml.jackson.databind.SequenceWriter;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 
@@ -11,6 +14,8 @@ import java.io.*;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.text.Normalizer;
@@ -21,6 +26,8 @@ import java.time.format.DateTimeParseException;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -28,17 +35,21 @@ import java.util.zip.ZipOutputStream;
 
 public class App {
 
+    private static final Logger LOGGER = Logger.getLogger(App.class.getName());
     private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
     private static final Pattern EVENTOS_SINISTROS_PATTERN = Pattern.compile("\\b(eventos|sinistros)\\b", Pattern.CASE_INSENSITIVE);
     private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
             "RegistroANS", List.of("REG_ANS", "REGANS", "REGISTRO ANS"),
+            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ OPERADORA"),
+            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME OPERADORA", "OPERADORA"),
             "Data", List.of("DATA", "DT_REF", "DATA_REFERENCIA", "DATA REFERENCIA"),
             "ContaContabil", List.of("CD_CONTA_CONTABIL", "CONTA_CONTABIL", "CONTA CONTABIL"),
             "Descricao", List.of("DESCRICAO", "DESCR", "DESCRIÇÃO"),
             "ValorDespesas", List.of("VL_SALDO_FINAL", "VL_SALDO", "VALOR", "VALOR DESPESA", "VL_DESPESA")
     );
     private static final List<String> COLUNAS_SAIDA = List.of(
+            "CNPJ",
             "RegistroANS",
             "Ano",
             "Trimestre",
@@ -68,14 +79,22 @@ public class App {
 
         Path csvSaida = baseDir.resolve("consolidado_despesas.csv");
         Path zipSaida = baseDir.resolve("consolidado_despesas.zip");
+        Path csvAgregado = baseDir.resolve("despesas_agregadas.csv");
 
         System.out.println("Gerando consolidado em " + csvSaida + "...");
         gerarConsolidado(recentes, baseDir, csvSaida);
         System.out.println("Compactando consolidado em " + zipSaida + "...");
         compactarCsv(csvSaida, zipSaida);
+        System.out.println("Gerando agregado em " + csvAgregado + "...");
+        new TransformacaoService().gerarDespesasAgregadas(baseDir, csvSaida, csvAgregado);
+        System.out.println("Processamento concluído: " + csvAgregado + " gerado com sucesso");
     }
 
     private static void download(String url, Path dest) throws Exception {
+        if (Files.exists(dest)) {
+            System.out.println("Arquivo já existe, pulando download: " + dest.getFileName());
+            return;
+        }
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .build();
@@ -92,6 +111,14 @@ public class App {
     }
 
     private static void unzip(Path zip, Path dest) throws IOException {
+        if (Files.exists(dest)) {
+            try (var stream = Files.walk(dest)) {
+                if (stream.anyMatch(Files::isRegularFile)) {
+                    System.out.println("Pasta já contém arquivos, pulando extração: " + dest.getFileName());
+                    return;
+                }
+            }
+        }
         try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
@@ -149,28 +176,30 @@ public class App {
     }
 
     private static void parseDelimitedFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException {
-        CsvMapper mapper = new CsvMapper();
         char separador = detectarSeparador(arquivo);
-        CsvSchema schema = CsvSchema.emptySchema()
-                .withHeader()
-                .withColumnSeparator(separador)
-                .withQuoteChar('"');
+        CSVFormat format = CSVFormat.DEFAULT.builder()
+                .setDelimiter(separador)
+                .setQuote('"')
+                .setIgnoreEmptyLines(true)
+                .setTrim(true)
+                .setHeader()
+                .setSkipHeaderRecord(true)
+                .build();
 
-        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
-            MappingIterator<Map<String, String>> it =
-                    mapper.readerFor(Map.class)
-                            .with(schema)
-                            .readValues(reader);
-
-            Map<String, String> headerLookup = null;
-            while (it.hasNext()) {
-                Map<String, String> row = it.next();
-                if (headerLookup == null) {
-                    headerLookup = buildHeaderLookup(row.keySet());
+        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo));
+             CSVParser parser = format.parse(reader)) {
+            Map<String, String> headerLookup = buildHeaderLookup(parser.getHeaderMap().keySet());
+            for (CSVRecord record : parser) {
+                Map<String, String> row = new HashMap<>();
+                for (String header : parser.getHeaderMap().keySet()) {
+                    row.put(header, record.isMapped(header) ? record.get(header) : null);
                 }
                 DespesaEvento evento = mapRow(row, headerLookup);
                 if (evento != null) {
                     consumer.accept(evento);
+                } else {
+                    LOGGER.log(Level.FINE, "Linha ignorada por inconsistência: {0} em {1}",
+                            new Object[]{record.getRecordNumber(), arquivo.getFileName()});
                 }
             }
         }
@@ -209,12 +238,13 @@ public class App {
     }
 
     private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
+        String cnpj = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("CNPJ"));
         String registroAns = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RegistroANS"));
         String dataStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Data"));
         String contaContabil = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ContaContabil"));
         String descricao = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Descricao"));
         String valorStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ValorDespesas"));
-        if (registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
+        if (cnpj == null && registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
             return null;
         }
         if (!isDespesaEvento(contaContabil, descricao)) {
@@ -225,11 +255,12 @@ public class App {
             return null;
         }
         DespesaEvento evento = new DespesaEvento();
+        evento.setCnpj(normalizeCnpj(cnpj));
         evento.setRegistroAns(normalizeValue(registroAns));
         evento.setAno(dataReferencia.getYear());
-        evento.setTrimestre(trimestreFromMonth(dataReferencia.getMonthValue()));
+        evento.setTrimestre(formatTrimestre(dataReferencia));
         evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
-        if (evento.getRegistroAns() == null || evento.getValorDespesas() == null) {
+        if (evento.getValorDespesas() == null) {
             return null;
         }
         return evento;
@@ -297,16 +328,13 @@ public class App {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private static BigDecimal parseBigDecimal(String value) {
-        if (value == null) {
+    private static String normalizeCnpj(String value) {
+        String normalized = normalizeValue(value);
+        if (normalized == null) {
             return null;
         }
-        String normalized = value.replace(".", "").replace(",", ".");
-        try {
-            return new BigDecimal(normalized);
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        String digits = normalized.replaceAll("\\D", "");
+        return digits.length() == 14 ? digits : null;
     }
 
     private static LocalDate parseData(String value) {
@@ -314,11 +342,11 @@ public class App {
         if (normalized == null) {
             return null;
         }
-        for (DateTimeFormatter formatter : FORMATOS_DATA) {
-            try {
-                return LocalDate.parse(normalized, formatter);
-            } catch (DateTimeParseException ignored) {
-            }
+        String normalized = normalizeNumber(value);
+        try {
+            return new BigDecimal(normalized);
+        } catch (NumberFormatException e) {
+            return null;
         }
         return null;
     }
@@ -336,6 +364,39 @@ public class App {
         String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
         // Critério adotado: aceitar registros cuja descrição contenha "Eventos" ou "Sinistros"
         // OU cuja conta contábil esteja sob o prefixo 3.04.01.04 (contas de eventos/sinistros).
+        for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
+            if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static LocalDate parseData(String value) {
+        String normalized = normalizeValue(value);
+        if (normalized == null) {
+            return null;
+        }
+        for (DateTimeFormatter formatter : FORMATOS_DATA) {
+            try {
+                return LocalDate.parse(normalized, formatter);
+            } catch (DateTimeParseException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String formatTrimestre(LocalDate data) {
+        int trimestre = (data.getMonthValue() - 1) / 3 + 1;
+        return data.getYear() + "_" + trimestre + "_trimestre";
+    }
+
+    private static boolean isDespesaEvento(String contaContabil, String descricao) {
+        String descricaoValor = descricao == null ? "" : descricao;
+        if (EVENTOS_SINISTROS_PATTERN.matcher(descricaoValor).find()) {
+            return true;
+        }
+        String contaNormalizada = normalizeHeader(contaContabil == null ? "" : contaContabil);
         for (String prefixo : CONTAS_EVENTOS_SINISTROS_PREFIXOS) {
             if (contaNormalizada.startsWith(normalizeHeader(prefixo))) {
                 return true;
@@ -367,7 +428,126 @@ public class App {
                 return StandardCharsets.UTF_8;
             }
         }
-        return StandardCharsets.UTF_8;
+        byte[] sample;
+        try (InputStream in = Files.newInputStream(arquivo)) {
+            sample = in.readNBytes(64 * 1024);
+        }
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try {
+            decoder.decode(java.nio.ByteBuffer.wrap(sample));
+            return StandardCharsets.UTF_8;
+        } catch (Exception ignored) {
+            return StandardCharsets.ISO_8859_1;
+        }
+    }
+
+    private static String normalizeNumber(String value) {
+        String trimmed = normalizeValue(value);
+        if (trimmed == null) {
+            return null;
+        }
+        String cleaned = trimmed.replace(" ", "");
+        int lastComma = cleaned.lastIndexOf(',');
+        int lastDot = cleaned.lastIndexOf('.');
+        if (lastComma >= 0 && lastDot >= 0) {
+            char decimalSep = lastComma > lastDot ? ',' : '.';
+            String withoutThousands = cleaned.replace(decimalSep == ',' ? "." : ",", "");
+            return withoutThousands.replace(decimalSep, '.');
+        }
+        if (lastComma >= 0) {
+            String withoutThousands = cleaned.replace(".", "");
+            return withoutThousands.replace(',', '.');
+        }
+        if (lastDot >= 0) {
+            String withoutThousands = cleaned.replace(",", "");
+            return withoutThousands;
+        }
+        return cleaned;
+    }
+
+    private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
+                                         Path baseDir,
+                                         Path csvSaida) throws Exception {
+        CsvMapper mapper = new CsvMapper();
+        CsvSchema.Builder schemaBuilder = CsvSchema.builder();
+        for (String coluna : COLUNAS_SAIDA) {
+            schemaBuilder.addColumn(coluna);
+        }
+        CsvSchema schema = schemaBuilder.setUseHeader(true)
+                .setColumnSeparator(';')
+                .setQuoteChar('"')
+                .build();
+
+        Set<String> dedupe = new HashSet<>();
+        try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
+             SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
+            for (TrimestresFinder.TrimestreInfo info : trimestres) {
+                processarTrimestre(info, baseDir, evento -> {
+                    if (evento.getValorDespesas() == null
+                            || evento.getValorDespesas().signum() <= 0) {
+                        LOGGER.log(Level.WARNING, "Registro suspeito (valor <= 0) ignorado. CNPJ={0}, Trimestre={1}",
+                                new Object[]{evento.getCnpj(), evento.getTrimestre()});
+                        return;
+                    }
+                    String chave = buildDedupeKey(evento);
+                    if (!dedupe.add(chave)) {
+                        LOGGER.log(Level.WARNING, "Registro duplicado ignorado: {0}", chave);
+                        return;
+                    }
+                    escreverEvento(sequenceWriter, evento);
+                });
+            }
+        }
+    }
+
+    private static void processarTrimestre(TrimestresFinder.TrimestreInfo info,
+                                           Path baseDir,
+                                           Consumer<DespesaEvento> consumer) throws Exception {
+        for (URI zipUrl : info.urls()) {
+            String zipName = Paths.get(zipUrl.getPath()).getFileName().toString();
+            Path zip = baseDir.resolve(info.trimestre() + "-" + zipName);
+            Path extractDir = baseDir.resolve(info.trimestre()).resolve(zipName.replace(".zip", ""));
+
+            System.out.println("Baixando ZIP " + zipUrl + "...");
+            download(zipUrl.toString(), zip);
+
+            System.out.println("Extraindo ZIP " + zip + "...");
+            unzip(zip, extractDir);
+
+            List<Path> arquivos = findArquivosComDespesas(extractDir);
+            System.out.println("Arquivos encontrados em " + info.trimestre() + ": " + arquivos.size());
+            for (Path arquivo : arquivos) {
+                parseArquivoDespesas(arquivo, consumer);
+            }
+        }
+    }
+
+    private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
+        Map<String, Object> linha = new LinkedHashMap<>();
+        linha.put("CNPJ", evento.getCnpj());
+        linha.put("RegistroANS", evento.getRegistroAns());
+        linha.put("Ano", evento.getAno());
+        linha.put("Trimestre", evento.getTrimestre());
+        linha.put("ValorDespesas", evento.getValorDespesas() == null ? null : evento.getValorDespesas().toPlainString());
+        try {
+            writer.write(linha);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void compactarCsv(Path csv, Path zipDestino) throws IOException {
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipDestino))) {
+            ZipEntry entry = new ZipEntry(csv.getFileName().toString());
+            zos.putNextEntry(entry);
+            Files.copy(csv, zos);
+            zos.closeEntry();
+        }
+    }
+    private static String buildDedupeKey(DespesaEvento evento) {
+        return evento.getCnpj() + "|" + evento.getAno() + "|" + evento.getTrimestre();
     }
 
     private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
@@ -441,4 +621,5 @@ public class App {
         XLSX,
         UNKNOWN
     }
+
 }

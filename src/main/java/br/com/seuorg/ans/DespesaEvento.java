@@ -4,10 +4,19 @@ import java.math.BigDecimal;
 
 public class DespesaEvento {
 
+    private String cnpj;
     private String registroAns;
     private String trimestre;
     private Integer ano;
     private BigDecimal valorDespesas;
+
+    public String getRegistroAns() {
+        return registroAns;
+    }
+
+    public void setCnpj(String cnpj) {
+        this.cnpj = cnpj;
+    }
 
     public String getRegistroAns() {
         return registroAns;
