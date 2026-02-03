@@ -1,5 +1,6 @@
 package br.com.seuorg.ans;
 
+import br.com.seuorg.ans.service.TransformacaoService;
 import com.fasterxml.jackson.databind.SequenceWriter;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
@@ -48,6 +49,7 @@ public class App {
             "ValorDespesas", List.of("VL_SALDO_FINAL", "VL_SALDO", "VALOR", "VALOR DESPESA", "VL_DESPESA")
     );
     private static final List<String> COLUNAS_SAIDA = List.of(
+            "CNPJ",
             "RegistroANS",
             "Ano",
             "Trimestre",
@@ -77,11 +79,14 @@ public class App {
 
         Path csvSaida = baseDir.resolve("consolidado_despesas.csv");
         Path zipSaida = baseDir.resolve("consolidado_despesas.zip");
+        Path csvAgregado = baseDir.resolve("despesas_agregadas.csv");
 
         System.out.println("Gerando consolidado em " + csvSaida + "...");
         gerarConsolidado(recentes, baseDir, csvSaida);
         System.out.println("Compactando consolidado em " + zipSaida + "...");
         compactarCsv(csvSaida, zipSaida);
+        System.out.println("Gerando agregado em " + csvAgregado + "...");
+        new TransformacaoService().gerarDespesasAgregadas(baseDir, csvSaida, csvAgregado);
     }
 
     private static void download(String url, Path dest) throws Exception {
@@ -159,13 +164,6 @@ public class App {
 
     private static void parseDelimitedFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException {
         char separador = detectarSeparador(arquivo);
-        List<DespesaEvento> eventos = parseCsvDespesas(arquivo, separador);
-        for (DespesaEvento evento : eventos) {
-            consumer.accept(evento);
-        }
-    }
-
-    private static List<DespesaEvento> parseCsvDespesas(Path arquivo, char separador) throws IOException {
         CSVFormat format = CSVFormat.DEFAULT.builder()
                 .setDelimiter(separador)
                 .setQuote('"')
@@ -175,7 +173,6 @@ public class App {
                 .setSkipHeaderRecord(true)
                 .build();
 
-        List<DespesaEvento> eventos = new ArrayList<>();
         try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo));
              CSVParser parser = format.parse(reader)) {
             Map<String, String> headerLookup = buildHeaderLookup(parser.getHeaderMap().keySet());
@@ -186,14 +183,13 @@ public class App {
                 }
                 DespesaEvento evento = mapRow(row, headerLookup);
                 if (evento != null) {
-                    eventos.add(evento);
+                    consumer.accept(evento);
                 } else {
                     LOGGER.log(Level.FINE, "Linha ignorada por inconsistência: {0} em {1}",
                             new Object[]{record.getRecordNumber(), arquivo.getFileName()});
                 }
             }
         }
-        return eventos;
     }
 
     private static void parseXlsxFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException, InvalidFormatException {
@@ -229,12 +225,13 @@ public class App {
     }
 
     private static DespesaEvento mapRow(Map<String, String> row, Map<String, String> headerLookup) {
+        String cnpj = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("CNPJ"));
         String registroAns = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("RegistroANS"));
         String dataStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Data"));
         String contaContabil = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ContaContabil"));
         String descricao = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("Descricao"));
         String valorStr = getValueByAliases(row, headerLookup, COLUNAS_ALIAS.get("ValorDespesas"));
-        if (registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
+        if (cnpj == null && registroAns == null && dataStr == null && contaContabil == null && descricao == null && valorStr == null) {
             return null;
         }
         if (!isDespesaEvento(contaContabil, descricao)) {
@@ -245,11 +242,12 @@ public class App {
             return null;
         }
         DespesaEvento evento = new DespesaEvento();
+        evento.setCnpj(normalizeCnpj(cnpj));
         evento.setRegistroAns(normalizeValue(registroAns));
         evento.setAno(dataReferencia.getYear());
         evento.setTrimestre(formatTrimestre(dataReferencia));
         evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
-        if (evento.getRegistroAns() == null || evento.getValorDespesas() == null) {
+        if (evento.getValorDespesas() == null) {
             return null;
         }
         return evento;
@@ -315,6 +313,15 @@ public class App {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static String normalizeCnpj(String value) {
+        String normalized = normalizeValue(value);
+        if (normalized == null) {
+            return null;
+        }
+        String digits = normalized.replaceAll("\\D", "");
+        return digits.length() == 14 ? digits : null;
     }
 
     private static BigDecimal parseBigDecimal(String value) {
@@ -439,10 +446,24 @@ public class App {
                 .setQuoteChar('"')
                 .build();
 
+        Set<String> dedupe = new HashSet<>();
         try (Writer writer = Files.newBufferedWriter(csvSaida, StandardCharsets.UTF_8);
              SequenceWriter sequenceWriter = mapper.writer(schema).writeValues(writer)) {
             for (TrimestresFinder.TrimestreInfo info : trimestres) {
-                processarTrimestre(info, baseDir, evento -> escreverEvento(sequenceWriter, evento));
+                processarTrimestre(info, baseDir, evento -> {
+                    if (evento.getValorDespesas() == null
+                            || evento.getValorDespesas().signum() <= 0) {
+                        LOGGER.log(Level.WARNING, "Registro suspeito (valor <= 0) ignorado. CNPJ={0}, Trimestre={1}",
+                                new Object[]{evento.getCnpj(), evento.getTrimestre()});
+                        return;
+                    }
+                    String chave = buildDedupeKey(evento);
+                    if (!dedupe.add(chave)) {
+                        LOGGER.log(Level.WARNING, "Registro duplicado ignorado: {0}", chave);
+                        return;
+                    }
+                    escreverEvento(sequenceWriter, evento);
+                });
             }
         }
     }
@@ -471,6 +492,7 @@ public class App {
 
     private static void escreverEvento(SequenceWriter writer, DespesaEvento evento) {
         Map<String, Object> linha = new LinkedHashMap<>();
+        linha.put("CNPJ", evento.getCnpj());
         linha.put("RegistroANS", evento.getRegistroAns());
         linha.put("Ano", evento.getAno());
         linha.put("Trimestre", evento.getTrimestre());
@@ -490,6 +512,9 @@ public class App {
             zos.closeEntry();
         }
     }
+    private static String buildDedupeKey(DespesaEvento evento) {
+        return evento.getCnpj() + "|" + evento.getAno() + "|" + evento.getTrimestre();
+    }
 
     private enum FileType {
         CSV,
@@ -497,4 +522,5 @@ public class App {
         XLSX,
         UNKNOWN
     }
+
 }
