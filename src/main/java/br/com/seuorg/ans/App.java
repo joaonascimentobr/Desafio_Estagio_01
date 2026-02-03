@@ -1,9 +1,11 @@
 package br.com.seuorg.ans;
 
-import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.databind.SequenceWriter;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 
@@ -11,6 +13,8 @@ import java.io.*;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.text.Normalizer;
@@ -21,6 +25,8 @@ import java.time.format.DateTimeParseException;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -28,11 +34,14 @@ import java.util.zip.ZipOutputStream;
 
 public class App {
 
+    private static final Logger LOGGER = Logger.getLogger(App.class.getName());
     private static final String FRASE_DESPESAS = "Despesas com Eventos/Sinistros";
     private static final Pattern EVENTOS_SINISTROS_PATTERN = Pattern.compile("\\b(eventos|sinistros)\\b", Pattern.CASE_INSENSITIVE);
     private static final List<String> CONTAS_EVENTOS_SINISTROS_PREFIXOS = List.of("3.04.01.04");
     private static final Map<String, List<String>> COLUNAS_ALIAS = Map.of(
             "RegistroANS", List.of("REG_ANS", "REGANS", "REGISTRO ANS"),
+            "CNPJ", List.of("CNPJ", "CNPJ_OPERADORA", "CNPJ OPERADORA"),
+            "RazaoSocial", List.of("RAZAO SOCIAL", "RAZÃO SOCIAL", "NOME OPERADORA", "OPERADORA"),
             "Data", List.of("DATA", "DT_REF", "DATA_REFERENCIA", "DATA REFERENCIA"),
             "ContaContabil", List.of("CD_CONTA_CONTABIL", "CONTA_CONTABIL", "CONTA CONTABIL"),
             "Descricao", List.of("DESCRICAO", "DESCR", "DESCRIÇÃO"),
@@ -149,31 +158,42 @@ public class App {
     }
 
     private static void parseDelimitedFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException {
-        CsvMapper mapper = new CsvMapper();
         char separador = detectarSeparador(arquivo);
-        CsvSchema schema = CsvSchema.emptySchema()
-                .withHeader()
-                .withColumnSeparator(separador)
-                .withQuoteChar('"');
+        List<DespesaEvento> eventos = parseCsvDespesas(arquivo, separador);
+        for (DespesaEvento evento : eventos) {
+            consumer.accept(evento);
+        }
+    }
 
-        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo))) {
-            MappingIterator<Map<String, String>> it =
-                    mapper.readerFor(Map.class)
-                            .with(schema)
-                            .readValues(reader);
+    private static List<DespesaEvento> parseCsvDespesas(Path arquivo, char separador) throws IOException {
+        CSVFormat format = CSVFormat.DEFAULT.builder()
+                .setDelimiter(separador)
+                .setQuote('"')
+                .setIgnoreEmptyLines(true)
+                .setTrim(true)
+                .setHeader()
+                .setSkipHeaderRecord(true)
+                .build();
 
-            Map<String, String> headerLookup = null;
-            while (it.hasNext()) {
-                Map<String, String> row = it.next();
-                if (headerLookup == null) {
-                    headerLookup = buildHeaderLookup(row.keySet());
+        List<DespesaEvento> eventos = new ArrayList<>();
+        try (Reader reader = Files.newBufferedReader(arquivo, detectCharset(arquivo));
+             CSVParser parser = format.parse(reader)) {
+            Map<String, String> headerLookup = buildHeaderLookup(parser.getHeaderMap().keySet());
+            for (CSVRecord record : parser) {
+                Map<String, String> row = new HashMap<>();
+                for (String header : parser.getHeaderMap().keySet()) {
+                    row.put(header, record.isMapped(header) ? record.get(header) : null);
                 }
                 DespesaEvento evento = mapRow(row, headerLookup);
                 if (evento != null) {
-                    consumer.accept(evento);
+                    eventos.add(evento);
+                } else {
+                    LOGGER.log(Level.FINE, "Linha ignorada por inconsistência: {0} em {1}",
+                            new Object[]{record.getRecordNumber(), arquivo.getFileName()});
                 }
             }
         }
+        return eventos;
     }
 
     private static void parseXlsxFile(Path arquivo, Consumer<DespesaEvento> consumer) throws IOException, InvalidFormatException {
@@ -227,7 +247,7 @@ public class App {
         DespesaEvento evento = new DespesaEvento();
         evento.setRegistroAns(normalizeValue(registroAns));
         evento.setAno(dataReferencia.getYear());
-        evento.setTrimestre(trimestreFromMonth(dataReferencia.getMonthValue()));
+        evento.setTrimestre(formatTrimestre(dataReferencia));
         evento.setValorDespesas(parseBigDecimal(normalizeValue(valorStr)));
         if (evento.getRegistroAns() == null || evento.getValorDespesas() == null) {
             return null;
@@ -301,7 +321,7 @@ public class App {
         if (value == null) {
             return null;
         }
-        String normalized = value.replace(".", "").replace(",", ".");
+        String normalized = normalizeNumber(value);
         try {
             return new BigDecimal(normalized);
         } catch (NumberFormatException e) {
@@ -323,9 +343,9 @@ public class App {
         return null;
     }
 
-    private static String trimestreFromMonth(int month) {
-        int trimestre = (month - 1) / 3 + 1;
-        return trimestre + "T";
+    private static String formatTrimestre(LocalDate data) {
+        int trimestre = (data.getMonthValue() - 1) / 3 + 1;
+        return data.getYear() + "_" + trimestre + "_trimestre";
     }
 
     private static boolean isDespesaEvento(String contaContabil, String descricao) {
@@ -367,7 +387,43 @@ public class App {
                 return StandardCharsets.UTF_8;
             }
         }
-        return StandardCharsets.UTF_8;
+        byte[] sample;
+        try (InputStream in = Files.newInputStream(arquivo)) {
+            sample = in.readNBytes(64 * 1024);
+        }
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try {
+            decoder.decode(java.nio.ByteBuffer.wrap(sample));
+            return StandardCharsets.UTF_8;
+        } catch (Exception ignored) {
+            return StandardCharsets.ISO_8859_1;
+        }
+    }
+
+    private static String normalizeNumber(String value) {
+        String trimmed = normalizeValue(value);
+        if (trimmed == null) {
+            return null;
+        }
+        String cleaned = trimmed.replace(" ", "");
+        int lastComma = cleaned.lastIndexOf(',');
+        int lastDot = cleaned.lastIndexOf('.');
+        if (lastComma >= 0 && lastDot >= 0) {
+            char decimalSep = lastComma > lastDot ? ',' : '.';
+            String withoutThousands = cleaned.replace(decimalSep == ',' ? "." : ",", "");
+            return withoutThousands.replace(decimalSep, '.');
+        }
+        if (lastComma >= 0) {
+            String withoutThousands = cleaned.replace(".", "");
+            return withoutThousands.replace(',', '.');
+        }
+        if (lastDot >= 0) {
+            String withoutThousands = cleaned.replace(",", "");
+            return withoutThousands;
+        }
+        return cleaned;
     }
 
     private static void gerarConsolidado(List<TrimestresFinder.TrimestreInfo> trimestres,
