@@ -42,10 +42,50 @@ Este projeto resolve o **Teste de Entrada para Estagiários v2.0** da Intuitive 
    java -jar target/ans-demonstracoes-1.0.0.jar
    ```
 
+**Instruções de Execução - API (Python)**
+1. Instalar dependências:
+   ```bash
+   pip install -r api/requirements.txt
+   ```
+2. Iniciar a API:
+   ```bash
+   python api/main.py
+   ```
+3. Documentação interativa:
+   ```text
+   http://localhost:8085/docs
+   ```
+
+**Configuração Front-end (Vue.js)**
+```javascript
+const api = axios.create({
+  baseURL: 'http://localhost:8085'
+});
+```
+
+**Docker (Motivação e Uso)**
+- **Por que Docker**: garante ambiente reproduzível (mesmas versões de PostgreSQL e dependências), reduz erros de "funciona na minha máquina" e facilita a avaliação.
+- **Isolamento**: o banco de dados roda em container separado, sem interferir com serviços locais.
+- **Portabilidade**: permite executar o projeto em qualquer máquina com Docker instalado, sem setup manual do PostgreSQL.
+
+**Execução com Docker**
+```bash
+docker compose up --build
+```
+
+**Observação**
+- O `docker-compose.yml` inicia o PostgreSQL e a API, e aplica o schema via `sql/ans_postgresql.sql`.
+
 **Análises Críticas**
 - Validação: "Optei por descartar registros com CNPJ inválido ou valores negativos pois, em uma análise de despesas de saúde, dados inconsistentes distorceriam o cálculo do Desvio Padrão e da Média trimestral".
 - Performance do Join: "A escolha de um HashMap para os dados cadastrais visa a performance O(1) na busca durante o processamento do arquivo de despesas, que possui volume significativamente maior".
 - Desvio Padrão: "O cálculo do desvio padrão foi implementado para identificar operadoras com alta volatilidade em seus gastos, o que é um indicador crítico para a saúde financeira da operação".
+- Escolha do PostgreSQL: "Optou-se pelo PostgreSQL pela robustez no suporte a tipos de dados financeiros (DECIMAL) e pela eficiência de suas funções analíticas (Window Functions), essenciais para o cálculo de crescimento e médias trimestrais".
+- Normalização: "A abordagem normalizada foi escolhida para evitar a duplicação de dados das operadoras em cada linha de despesa, otimizando o armazenamento e a consistência dos dados".
+- Tratamento de Inconsistências SQL: "Durante a importação, strings inválidas em campos numéricos são rejeitadas para manter a integridade dos cálculos estatísticos de média e desvio padrão realizados anteriormente no Java".
+- Resiliência na Importação SQL: "Os scripts SQL foram desenhados para suportar a natureza heterogênea dos dados da ANS. Enquanto o arquivo de despesas (consolidado via Java) utiliza UTF-8, o arquivo cadastral original utiliza ISO-8859-1 com delimitador ;. O script dml.sql trata essas diferenças explicitamente para evitar corrupção de caracteres especiais (acentuação) em nomes de operadoras e cidades."
+- Segurança e Escalabilidade: "A conexão com o PostgreSQL foi isolada em variáveis de ambiente (.env), seguindo boas práticas de segurança. Além disso, a API implementa paginação nativa e filtros no lado do servidor (Server-side filtering), garantindo que a aplicação permaneça rápida mesmo com o crescimento da base de dados da ANS."
+- Modo Offline: "Para garantir a portabilidade da solução em ambientes com restrição de rede (Air-gapped ou Sandbox), o pipeline implementa uma verificação de cache local. Se os arquivos .csv e .zip da ANS já estiverem presentes no diretório, o sistema realiza o processamento imediato sem necessidade de nova conexão."
 
 **Saída**
 - `target/ans/consolidado_despesas.csv`
