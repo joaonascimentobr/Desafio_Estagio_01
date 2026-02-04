@@ -91,6 +91,3 @@ docker compose up --build
 - `target/ans/consolidado_despesas.csv`
 - `target/ans/consolidado_despesas.zip`
 - `target/ans/despesas_agregadas.csv` (resultado do Teste 2)
-
-**Entrega**
-- O pacote final deve ser um único arquivo `Teste_(seu_nome).zip` contendo **código-fonte**, **CSV(s)** e **documentação**.
